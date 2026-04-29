@@ -60,7 +60,7 @@ _install_ok=0
 cleanup() {
     [[ $DRY_RUN -eq 1 ]] && return
     rm -f "$DOWNLOAD_DIR"/*.part 2>/dev/null
-    [[ $_install_ok -eq 0 ]] && wineserver -k 2>/dev/null || true
+    [[ $_install_ok -0 ]] && wineserver -k 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -272,7 +272,8 @@ while true; do
                 CSP_EXE_NAME="$(basename "$custom")"
                 if [[ $DRY_RUN -eq 0 ]]; then
                     mkdir -p "$DOWNLOAD_DIR"
-                    cp "$custom" "$DOWNLOAD_DIR/$CSP_EXE_NAME"
+                    # Fix: use full path for copy
+                    cp "$(realpath "$custom")" "$DOWNLOAD_DIR/$CSP_EXE_NAME"
                 fi
                 CSP_URL=""
                 CSP_VERSION="custom"
@@ -578,6 +579,12 @@ else
         wine "$DOWNLOAD_DIR/$CSP_EXE_NAME" >> "$LOG_FILE" 2>&1 &
     wait $! || die "CSP installer failed"
     [[ -f "$CSP_INSTALL_PATH" ]] || die "CSP not found after install, did you complete the installer?"
+    
+    # 1: Fix - Delete the launcher created by the installer
+    find "$HOME/.local/share/applications" -name "*CLIP STUDIO PAINT*.desktop" -delete 2>/dev/null || true
+    find "$HOME/Desktop" -name "*CLIP STUDIO PAINT*.desktop" -delete 2>/dev/null || true
+    ok "Removed installer-generated launchers"
+    
     ok "Clip Studio Paint"
 
     run wine reg add "HKCU\\Software\\Wine\\AppDefaults\\msedgewebview2.exe" /v Version /t REG_SZ /d "win7" /f || warn "failed to set webview2 version"
@@ -598,6 +605,13 @@ if [[ $DRY_RUN -eq 1 ]]; then
     fi
     ok ".clip thumbnails + MIME type (dry run)"
 else
+
+# 2: Fix - Pull in the app icon
+ICON_PATH="$HOME/.local/share/icons/clipstudiopaint.png"
+ICON_STUDIO_PATH="$HOME/.local/share/icons/clipstudio.png"
+mkdir -p "$HOME/.local/share/icons"
+ensure_asset "assets/clipstudiopaint.png" "$ICON_PATH"
+ensure_asset "assets/clipstudio.png" "$ICON_STUDIO_PATH"
 
 cat > "$LAUNCH_SCRIPT" << LAUNCHEOF
 #!/usr/bin/env bash
@@ -621,17 +635,13 @@ fi
 WINE_PID=\$!
 
 # Strip fullscreen state whenever CSP sets it (Wine maps borderless-maximized to fullscreen).
-# Poll quickly until the main paint window appears, fix it immediately, then use xprop -spy
-# for near-instant reaction to any future fullscreen changes.
 if command -v wmctrl &>/dev/null && command -v xprop &>/dev/null; then
     (
-        # Poll for any clipstudiopaint window that goes fullscreen
         while kill -0 "\$WINE_PID" 2>/dev/null; do
             while IFS= read -r _wid; do
                 _st=\$(xprop -id "\$_wid" _NET_WM_STATE 2>/dev/null)
                 if [[ "\$_st" == *FULLSCREEN* ]]; then
                     wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
-                    # Window found and fixed — switch to event-based watching
                     xprop -id "\$_wid" -spy _NET_WM_STATE 2>/dev/null | while IFS= read -r _line; do
                         [[ "\$_line" == *FULLSCREEN* ]] && wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
                     done
@@ -680,6 +690,7 @@ Type=Application
 Categories=Graphics;
 MimeType=application/x-clip;
 StartupWMClass=clipstudiopaint.exe
+Icon=$ICON_PATH
 EOF
 
 cat > "$DESKTOP_STUDIO" << EOF
@@ -690,6 +701,7 @@ Terminal=false
 Type=Application
 Categories=Graphics;
 StartupWMClass=clipstudio.exe
+Icon=$ICON_STUDIO_PATH
 EOF
 
 chmod +x "$DESKTOP_FILE" "$DESKTOP_STUDIO"
@@ -734,7 +746,6 @@ if [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]]; then
                 dbus-send --type=method_call --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
             ok "KDE window rules"
         else
-            # Upgrade path: add fullscreen=false if missing from existing rule
             _csp_uuid=$(awk -F'[][]' '/^\[/{grp=$2} /CSPenguin:/{print grp; exit}' "$_kwinrc" 2>/dev/null || true)
             if [[ -n "$_csp_uuid" ]]; then
                 _fs_val=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key fullscreen 2>/dev/null || true)
