@@ -60,7 +60,7 @@ _install_ok=0
 cleanup() {
     [[ $DRY_RUN -eq 1 ]] && return
     rm -f "$DOWNLOAD_DIR"/*.part 2>/dev/null
-    [[ $_install_ok -0 ]] && wineserver -k 2>/dev/null || true
+    [[ $_install_ok -eq 0 ]] && wineserver -k 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -272,7 +272,6 @@ while true; do
                 CSP_EXE_NAME="$(basename "$custom")"
                 if [[ $DRY_RUN -eq 0 ]]; then
                     mkdir -p "$DOWNLOAD_DIR"
-                    # Fix: use full path for copy
                     cp "$(realpath "$custom")" "$DOWNLOAD_DIR/$CSP_EXE_NAME"
                 fi
                 CSP_URL=""
@@ -336,14 +335,12 @@ _wine_tar="$DOWNLOAD_DIR/wine-${WINE_VERSION}-amd64.tar.xz"
 _need_wine=0
 [[ ! -x "$WINE_BIN" ]] && _need_wine=1
 
-# CSP gets its own progress bar (it's the big one)
 if [[ -n "${CSP_URL:-}" ]]; then
     download_progress "Clip Studio Paint" "$CSP_URL" "$DOWNLOAD_DIR/$CSP_EXE_NAME"
 else
     ok "Clip Studio Paint (local file)"
 fi
 
-# rest in parallel
 _dl_pids=()
 _dl_names=()
 _dl_dests=()
@@ -400,7 +397,6 @@ if [[ ${#_dl_pids[@]} -gt 0 ]]; then
     done
 fi
 
-# extract wine
 if [[ $_need_wine -eq 1 ]] && [[ $DRY_RUN -eq 0 ]]; then
     info "extracting Wine ${WINE_VERSION}..."
     rm -rf "$WINE_DIR"
@@ -432,7 +428,6 @@ if [[ $DRY_RUN -eq 0 ]]; then
 fi
 wait_for "initialising prefix" env WINEDEBUG=-all wineboot --init
 
-# esync
 if [[ $DRY_RUN -eq 1 ]]; then
     ok "esync file limits (dry run)"
 else
@@ -489,7 +484,6 @@ else
     fi
 fi
 
-# compatibility settings (must be after winetricks — dotnet48 resets the version)
 if [[ $DRY_RUN -eq 0 ]]; then
     run wine reg add "HKCU\\Software\\Wine" /v Version /t REG_SZ /d "win10" /f || warn "failed to set windows version"
     run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "concrt140" /t REG_SZ /d "native,builtin" /f || warn "failed to set concrt140 override"
@@ -579,12 +573,11 @@ else
         wine "$DOWNLOAD_DIR/$CSP_EXE_NAME" >> "$LOG_FILE" 2>&1 &
     wait $! || die "CSP installer failed"
     [[ -f "$CSP_INSTALL_PATH" ]] || die "CSP not found after install, did you complete the installer?"
-    
-    # 1: Fix - Delete the launcher created by the installer
+
     find "$HOME/.local/share/applications" -name "*CLIP STUDIO PAINT*.desktop" -delete 2>/dev/null || true
     find "$HOME/Desktop" -name "*CLIP STUDIO PAINT*.desktop" -delete 2>/dev/null || true
     ok "Removed installer-generated launchers"
-    
+
     ok "Clip Studio Paint"
 
     run wine reg add "HKCU\\Software\\Wine\\AppDefaults\\msedgewebview2.exe" /v Version /t REG_SZ /d "win7" /f || warn "failed to set webview2 version"
@@ -606,12 +599,28 @@ if [[ $DRY_RUN -eq 1 ]]; then
     ok ".clip thumbnails + MIME type (dry run)"
 else
 
-# 2: Fix - Pull in the app icon
-ICON_PATH="$HOME/.local/share/icons/clipstudiopaint.png"
+# --- UPDATED ICON PULL LOGIC ---
+ICON_PATH="$HOME/.local/share/icons/clipstudiopaint_macos.png"
 ICON_STUDIO_PATH="$HOME/.local/share/icons/clipstudio.png"
+
+# Remote sources for icons
+URL_PAINT_ICON="https://images.icon-icons.com/3053/PNG/512/clip_studio_paint_macos_bigsur_icon_189480.png"
+URL_STUDIO_ICON="https://raw.githubusercontent.com/parka6060/CSPenguin-Installer/main/assets/clipstudio.png"
+
 mkdir -p "$HOME/.local/share/icons"
-ensure_asset "assets/clipstudiopaint.png" "$ICON_PATH"
-ensure_asset "assets/clipstudio.png" "$ICON_STUDIO_PATH"
+
+# Pull Paint icon (MacOS Big Sur)[cite: 1]
+if [[ ! -f "$ICON_PATH" ]]; then
+    info "Fetching macOS Paint icon..."
+    wget -q -O "$ICON_PATH" "$URL_PAINT_ICON" || warn "Failed to fetch Paint icon"
+fi
+
+# Pull Studio icon from repo[cite: 1]
+if [[ ! -f "$ICON_STUDIO_PATH" ]]; then
+    info "Fetching standard Studio icon..."
+    wget -q -O "$ICON_STUDIO_PATH" "$URL_STUDIO_ICON" || warn "Failed to fetch Studio icon"
+fi
+# --- END UPDATED LOGIC ---
 
 cat > "$LAUNCH_SCRIPT" << LAUNCHEOF
 #!/usr/bin/env bash
@@ -807,7 +816,7 @@ THUMBEOF
     ok ".clip thumbnails + MIME type"
 fi
 
-fi  # end dry-run guard for desktop integration
+fi
 
 # [7/7] finishing up
 
@@ -858,8 +867,6 @@ EOF
 else
     ok "wineserver pre-warm skipped"
 fi
-
-# done
 
 _install_ok=1
 
