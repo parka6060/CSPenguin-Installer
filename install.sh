@@ -272,7 +272,7 @@ while true; do
                 CSP_EXE_NAME="$(basename "$custom")"
                 if [[ $DRY_RUN -eq 0 ]]; then
                     mkdir -p "$DOWNLOAD_DIR"
-                    cp "$custom" "$DOWNLOAD_DIR/$CSP_EXE_NAME"
+                    cp "$(realpath "$custom")" "$DOWNLOAD_DIR/$CSP_EXE_NAME"
                 fi
                 CSP_URL=""
                 CSP_VERSION="custom"
@@ -335,14 +335,12 @@ _wine_tar="$DOWNLOAD_DIR/wine-${WINE_VERSION}-amd64.tar.xz"
 _need_wine=0
 [[ ! -x "$WINE_BIN" ]] && _need_wine=1
 
-# CSP gets its own progress bar (it's the big one)
 if [[ -n "${CSP_URL:-}" ]]; then
     download_progress "Clip Studio Paint" "$CSP_URL" "$DOWNLOAD_DIR/$CSP_EXE_NAME"
 else
     ok "Clip Studio Paint (local file)"
 fi
 
-# rest in parallel
 _dl_pids=()
 _dl_names=()
 _dl_dests=()
@@ -399,7 +397,6 @@ if [[ ${#_dl_pids[@]} -gt 0 ]]; then
     done
 fi
 
-# extract wine
 if [[ $_need_wine -eq 1 ]] && [[ $DRY_RUN -eq 0 ]]; then
     info "extracting Wine ${WINE_VERSION}..."
     rm -rf "$WINE_DIR"
@@ -431,7 +428,6 @@ if [[ $DRY_RUN -eq 0 ]]; then
 fi
 wait_for "initialising prefix" env WINEDEBUG=-all wineboot --init
 
-# esync
 if [[ $DRY_RUN -eq 1 ]]; then
     ok "esync file limits (dry run)"
 else
@@ -488,7 +484,6 @@ else
     fi
 fi
 
-# compatibility settings (must be after winetricks — dotnet48 resets the version)
 if [[ $DRY_RUN -eq 0 ]]; then
     run wine reg add "HKCU\\Software\\Wine" /v Version /t REG_SZ /d "win10" /f || warn "failed to set windows version"
     run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "concrt140" /t REG_SZ /d "native,builtin" /f || warn "failed to set concrt140 override"
@@ -578,6 +573,11 @@ else
         wine "$DOWNLOAD_DIR/$CSP_EXE_NAME" >> "$LOG_FILE" 2>&1 &
     wait $! || die "CSP installer failed"
     [[ -f "$CSP_INSTALL_PATH" ]] || die "CSP not found after install, did you complete the installer?"
+
+    find "$HOME/.local/share/applications" -name "*CLIP STUDIO PAINT*.desktop" -delete 2>/dev/null || true
+    find "$HOME/Desktop" -name "*CLIP STUDIO PAINT*.desktop" -delete 2>/dev/null || true
+    ok "Removed installer-generated launchers"
+
     ok "Clip Studio Paint"
 
     run wine reg add "HKCU\\Software\\Wine\\AppDefaults\\msedgewebview2.exe" /v Version /t REG_SZ /d "win7" /f || warn "failed to set webview2 version"
@@ -598,6 +598,29 @@ if [[ $DRY_RUN -eq 1 ]]; then
     fi
     ok ".clip thumbnails + MIME type (dry run)"
 else
+
+# --- UPDATED ICON PULL LOGIC ---
+ICON_PATH="$HOME/.local/share/icons/clipstudiopaint_macos.png"
+ICON_STUDIO_PATH="$HOME/.local/share/icons/clipstudio.png"
+
+# Remote sources for icons
+URL_PAINT_ICON="https://images.icon-icons.com/3053/PNG/512/clip_studio_paint_macos_bigsur_icon_189480.png"
+URL_STUDIO_ICON="https://raw.githubusercontent.com/parka6060/CSPenguin-Installer/main/assets/clipstudio.png"
+
+mkdir -p "$HOME/.local/share/icons"
+
+# Pull Paint icon (MacOS Big Sur)[cite: 1]
+if [[ ! -f "$ICON_PATH" ]]; then
+    info "Fetching macOS Paint icon..."
+    wget -q -O "$ICON_PATH" "$URL_PAINT_ICON" || warn "Failed to fetch Paint icon"
+fi
+
+# Pull Studio icon from repo[cite: 1]
+if [[ ! -f "$ICON_STUDIO_PATH" ]]; then
+    info "Fetching standard Studio icon..."
+    wget -q -O "$ICON_STUDIO_PATH" "$URL_STUDIO_ICON" || warn "Failed to fetch Studio icon"
+fi
+# --- END UPDATED LOGIC ---
 
 cat > "$LAUNCH_SCRIPT" << LAUNCHEOF
 #!/usr/bin/env bash
@@ -621,17 +644,13 @@ fi
 WINE_PID=\$!
 
 # Strip fullscreen state whenever CSP sets it (Wine maps borderless-maximized to fullscreen).
-# Poll quickly until the main paint window appears, fix it immediately, then use xprop -spy
-# for near-instant reaction to any future fullscreen changes.
 if command -v wmctrl &>/dev/null && command -v xprop &>/dev/null; then
     (
-        # Poll for any clipstudiopaint window that goes fullscreen
         while kill -0 "\$WINE_PID" 2>/dev/null; do
             while IFS= read -r _wid; do
                 _st=\$(xprop -id "\$_wid" _NET_WM_STATE 2>/dev/null)
                 if [[ "\$_st" == *FULLSCREEN* ]]; then
                     wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
-                    # Window found and fixed — switch to event-based watching
                     xprop -id "\$_wid" -spy _NET_WM_STATE 2>/dev/null | while IFS= read -r _line; do
                         [[ "\$_line" == *FULLSCREEN* ]] && wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
                     done
@@ -680,6 +699,7 @@ Type=Application
 Categories=Graphics;
 MimeType=application/x-clip;
 StartupWMClass=clipstudiopaint.exe
+Icon=$ICON_PATH
 EOF
 
 cat > "$DESKTOP_STUDIO" << EOF
@@ -690,6 +710,7 @@ Terminal=false
 Type=Application
 Categories=Graphics;
 StartupWMClass=clipstudio.exe
+Icon=$ICON_STUDIO_PATH
 EOF
 
 chmod +x "$DESKTOP_FILE" "$DESKTOP_STUDIO"
@@ -734,7 +755,6 @@ if [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]]; then
                 dbus-send --type=method_call --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
             ok "KDE window rules"
         else
-            # Upgrade path: add fullscreen=false if missing from existing rule
             _csp_uuid=$(awk -F'[][]' '/^\[/{grp=$2} /CSPenguin:/{print grp; exit}' "$_kwinrc" 2>/dev/null || true)
             if [[ -n "$_csp_uuid" ]]; then
                 _fs_val=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key fullscreen 2>/dev/null || true)
@@ -796,7 +816,7 @@ THUMBEOF
     ok ".clip thumbnails + MIME type"
 fi
 
-fi  # end dry-run guard for desktop integration
+fi
 
 # [7/7] finishing up
 
@@ -847,8 +867,6 @@ EOF
 else
     ok "wineserver pre-warm skipped"
 fi
-
-# done
 
 _install_ok=1
 
