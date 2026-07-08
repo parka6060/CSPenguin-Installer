@@ -30,13 +30,27 @@ cd CSPenguin-Installer
 ./install.sh
 ```
 
+Update your prefix with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/parka6060/CSPenguin-Installer/main/install.sh | bash -s -- --update
+```
+
+Or if you cloned the repo:
+
+```bash
+./install.sh --update
+```
+
+This skips the CSP/Wine download and reinstall, and just reapplies the latest config, patches, and fonts to your existing prefix. Requires Wine and CSP to already be installed.
+
 The script downloads CSP and WebView2, sets up a Wine prefix, installs dependencies, applies patches, and creates desktop entries. You'll walk through the CSP installer when it pops up and pick a version (5.0.1 or 4.1.0) You can also bring your own installer via link or file.
 
 ## What gets installed
 
 1. Wine 11.4 (bundled, portable) at `~/.local/share/cspenguin/wine-11.4/`
 2. Wine prefix at `~/.wine-csp`
-3. Corefonts, cjkfonts, vcrun2022, and dotnet48 as runtime dependencies
+3. Corefonts, vcrun2022, and dotnet48 as runtime dependencies, plus a lightweight CJK font (WenQuanYi Micro Hei) for the asset store and brushes.
 4. DXVK + VKD3D
 5. WebView2 Runtime (standalone installer)
 6. dcomp.dll + libwinpthread-1.dll, a DirectComposition shim + dependency so WebView2 panels render correctly
@@ -61,7 +75,6 @@ winetricks <package>
 - Timelapse should work 100%, but animation export at non-default framerates could break encoding; not thoroughly tested.
 - The timelapse patch DLLs are built against the bundled Wine version 11.4. Trying to use them elsewhere is not recommended.
 - The installer can take a while, especially if downloading dotnet files.
-- The first launch of CSP will be slow. Restarting your PC helps with subsequent launches!
 
 ## Support
 This project is my gift to the community. If you have problems feel free to open an issue, or get in touch with me. But please do not expect me to fix installs on a case by case basis.

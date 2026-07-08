@@ -4,11 +4,13 @@ set -euo pipefail
 VERBOSE=0
 SKIP_WINETRICKS=0
 DRY_RUN=0
+UPDATE_ONLY=0
 _ESYNC_RESTART=0
 for arg in "$@"; do
     [[ "$arg" == "--verbose"         || "$arg" == "-v" ]] && VERBOSE=1
     [[ "$arg" == "--skip-winetricks" || "$arg" == "-s" ]] && SKIP_WINETRICKS=1
     [[ "$arg" == "--dry-run"         || "$arg" == "-n" ]] && DRY_RUN=1
+    [[ "$arg" == "--update"          || "$arg" == "-u" ]] && UPDATE_ONLY=1
 done
 
 DOWNLOAD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/csp-install"
@@ -60,7 +62,7 @@ _install_ok=0
 cleanup() {
     [[ $DRY_RUN -eq 1 ]] && return
     rm -f "$DOWNLOAD_DIR"/*.part 2>/dev/null
-    [[ $_install_ok -eq 0 ]] && wineserver -k 2>/dev/null || true
+    [[ $_install_ok -eq 0 ]] && [[ $UPDATE_ONLY -eq 0 ]] && wineserver -k 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -123,6 +125,145 @@ ensure_asset() {
     fi
 }
 
+# winetricks' cjkfonts pulls in a 112MB/28-face font (Source Han Sans >:C) that adds ~60s to every CSP startup. Swap it for something smaller to fix boot time. use --update to update your prefix.
+install_cjk_font_fix() {
+    local font_file="wqy-microhei.ttc"
+    local font_name="WenQuanYi Micro Hei"
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        ok "CJK font: $font_name (dry run)"
+        return
+    fi
+
+    local font_src="$SCRIPT_DIR/patches/fonts/$font_file"
+    ensure_asset "patches/fonts/$font_file" "$font_src"
+    if [[ ! -f "$font_src" ]]; then
+        warn "CJK font asset missing, skipping"
+        return
+    fi
+
+    local fonts_dir="$WINEPREFIX/drive_c/windows/Fonts"
+    mkdir -p "$fonts_dir"
+    cp "$font_src" "$fonts_dir/$font_file"
+    rm -f "$fonts_dir/sourcehansans.ttc"
+
+    local temp_dir="$WINEPREFIX/drive_c/windows/Temp"
+    mkdir -p "$temp_dir"
+    local reg_unix="$temp_dir/cjk-font.reg"
+    cat > "$reg_unix" << REGEOF
+REGEDIT4
+
+[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\Fonts]
+"Source Han Sans SC ExtraLight (TrueType)"=-
+"Source Han Sans SC Light (TrueType)"=-
+"Source Han Sans SC Normal (TrueType)"=-
+"Source Han Sans SC (TrueType)"=-
+"Source Han Sans SC Medium (TrueType)"=-
+"Source Han Sans SC Bold (TrueType)"=-
+"Source Han Sans SC Heavy (TrueType)"=-
+"Source Han Sans TC ExtraLight (TrueType)"=-
+"Source Han Sans TC Light (TrueType)"=-
+"Source Han Sans TC Normal (TrueType)"=-
+"Source Han Sans TC (TrueType)"=-
+"Source Han Sans TC Medium (TrueType)"=-
+"Source Han Sans TC Bold (TrueType)"=-
+"Source Han Sans TC Heavy (TrueType)"=-
+"Source Han Sans ExtraLight (TrueType)"=-
+"Source Han Sans Light (TrueType)"=-
+"Source Han Sans Normal (TrueType)"=-
+"Source Han Sans (TrueType)"=-
+"Source Han Sans Medium (TrueType)"=-
+"Source Han Sans Bold (TrueType)"=-
+"Source Han Sans Heavy (TrueType)"=-
+"Source Han Sans K ExtraLight (TrueType)"=-
+"Source Han Sans K Light (TrueType)"=-
+"Source Han Sans K Normal (TrueType)"=-
+"Source Han Sans K (TrueType)"=-
+"Source Han Sans K Medium (TrueType)"=-
+"Source Han Sans K Bold (TrueType)"=-
+"Source Han Sans K Heavy (TrueType)"=-
+"$font_name (TrueType)"="$font_file"
+
+[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Fonts]
+"Source Han Sans SC ExtraLight (TrueType)"=-
+"Source Han Sans SC Light (TrueType)"=-
+"Source Han Sans SC Normal (TrueType)"=-
+"Source Han Sans SC (TrueType)"=-
+"Source Han Sans SC Medium (TrueType)"=-
+"Source Han Sans SC Bold (TrueType)"=-
+"Source Han Sans SC Heavy (TrueType)"=-
+"Source Han Sans TC ExtraLight (TrueType)"=-
+"Source Han Sans TC Light (TrueType)"=-
+"Source Han Sans TC Normal (TrueType)"=-
+"Source Han Sans TC (TrueType)"=-
+"Source Han Sans TC Medium (TrueType)"=-
+"Source Han Sans TC Bold (TrueType)"=-
+"Source Han Sans TC Heavy (TrueType)"=-
+"Source Han Sans ExtraLight (TrueType)"=-
+"Source Han Sans Light (TrueType)"=-
+"Source Han Sans Normal (TrueType)"=-
+"Source Han Sans (TrueType)"=-
+"Source Han Sans Medium (TrueType)"=-
+"Source Han Sans Bold (TrueType)"=-
+"Source Han Sans Heavy (TrueType)"=-
+"Source Han Sans K ExtraLight (TrueType)"=-
+"Source Han Sans K Light (TrueType)"=-
+"Source Han Sans K Normal (TrueType)"=-
+"Source Han Sans K (TrueType)"=-
+"Source Han Sans K Medium (TrueType)"=-
+"Source Han Sans K Bold (TrueType)"=-
+"Source Han Sans K Heavy (TrueType)"=-
+"$font_name (TrueType)"="$font_file"
+
+[HKEY_CURRENT_USER\Software\Wine\Fonts\Replacements]
+"Dengxian"="$font_name"
+"FangSong"="$font_name"
+"KaiTi"="$font_name"
+"Microsoft YaHei"="$font_name"
+"Microsoft YaHei UI"="$font_name"
+"NSimSun"="$font_name"
+"SimHei"="$font_name"
+"SimKai"="$font_name"
+"SimSun"="$font_name"
+"SimSun-ExtB"="$font_name"
+"DFKai-SB"="$font_name"
+"Microsoft JhengHei"="$font_name"
+"Microsoft JhengHei UI"="$font_name"
+"MingLiU"="$font_name"
+"PMingLiU"="$font_name"
+"MingLiU-ExtB"="$font_name"
+"PMingLiU-ExtB"="$font_name"
+"Meiryo"="$font_name"
+"Meiryo UI"="$font_name"
+"MS Gothic"="$font_name"
+"MS PGothic"="$font_name"
+"MS Mincho"="$font_name"
+"MS PMincho"="$font_name"
+"MS UI Gothic"="$font_name"
+"Yu Gothic"="$font_name"
+"Yu Gothic UI"="$font_name"
+"Yu Mincho"="$font_name"
+"Batang"="$font_name"
+"BatangChe"="$font_name"
+"Dotum"="$font_name"
+"DotumChe"="$font_name"
+"Gulim"="$font_name"
+"GulimChe"="$font_name"
+"Gungsuh"="$font_name"
+"GungsuhChe"="$font_name"
+"Malgun Gothic"="$font_name"
+
+[HKEY_CURRENT_USER\Software\Wine\X11 Driver]
+"ClientSideAntiAliasWithCore"="Y"
+"ClientSideAntiAliasWithRender"="Y"
+"ClientSideWithRender"="Y"
+REGEOF
+
+    run wine regedit /S 'C:\windows\Temp\cjk-font.reg'
+    rm -f "$reg_unix"
+    ok "CJK font: $font_name (was Source Han Sans, ~60s faster CSP startup)"
+}
+
 wait_for() {
     local msg="$1"; shift
     if [[ $DRY_RUN -eq 1 ]]; then
@@ -160,8 +301,9 @@ download_progress() {
         return
     fi
     local total
-    total=$(wget --spider --server-response "$url" 2>&1 \
-        | grep -i content-length | tail -1 | awk '{print $2}' | tr -d '\r')
+    total=$(curl -fsSIL "$url" \
+        | awk 'tolower($1)=="content-length:" {print $2}' \
+        | tail -1 | tr -d '\r' || true)
     local tmp="${dest}.part"
     if [[ -z "$total" ]] || ! [[ "$total" =~ ^[0-9]+$ ]] || [[ "$total" -eq 0 ]]; then
         wait_for "$name" wget -q --timeout=30 --tries=3 -O "$tmp" "$url"
@@ -203,6 +345,7 @@ _gst_ok() { command -v gst-inspect-1.0 >/dev/null 2>&1 && gst-inspect-1.0 h264pa
 _install_deps_pacman() {
     local pkgs=()
     command -v wget   >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl   >/dev/null 2>&1 || pkgs+=(curl)
     command -v wmctrl >/dev/null 2>&1 || pkgs+=(wmctrl)
     command -v xprop  >/dev/null 2>&1 || pkgs+=(xorg-xprop)
     _gst_ok         || pkgs+=(gst-plugins-bad gst-plugins-good)
@@ -212,6 +355,7 @@ _install_deps_pacman() {
 _install_deps_dnf() {
     local pkgs=()
     command -v wget   >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl   >/dev/null 2>&1 || pkgs+=(curl)
     command -v wmctrl >/dev/null 2>&1 || pkgs+=(wmctrl)
     command -v xprop  >/dev/null 2>&1 || pkgs+=(xprop)
     _gst_ok         || pkgs+=(gstreamer1-plugins-bad-free gstreamer1-plugins-good)
@@ -221,6 +365,7 @@ _install_deps_dnf() {
 _install_deps_apt() {
     local pkgs=(dirmngr ca-certificates)
     command -v wget   >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl   >/dev/null 2>&1 || pkgs+=(curl)
     command -v wmctrl >/dev/null 2>&1 || pkgs+=(wmctrl)
     command -v xprop  >/dev/null 2>&1 || pkgs+=(x11-utils)
     _gst_ok         || pkgs+=(gstreamer1.0-plugins-bad gstreamer1.0-plugins-good)
@@ -235,6 +380,41 @@ else
     : > "$LOG_FILE"
     echo "CSPenguin-Installer > $(date)" >> "$LOG_FILE"
 fi
+
+# --update: skip install steps, just regenerate launch scripts + config
+if [[ $UPDATE_ONLY -eq 1 ]]; then
+    export PATH="$WINE_DIR/bin:$PATH"
+    export WINEPREFIX WINEARCH WINESERVER="$WINESERVER_BIN"
+
+    if [[ ! -d "$WINE_DIR" ]]; then
+        die "Wine not found at $WINE_DIR — run a full install first"
+    fi
+    if [[ ! -f "$CSP_INSTALL_PATH" ]]; then
+        die "CSP not found at $CSP_INSTALL_PATH — run a full install first"
+    fi
+
+    echo ""
+    echo -e "  ${TEAL}${BOLD}CSPenguin update mode${RESET}"
+    echo -e "  ${DIM}regenerating launch scripts, config, and service${RESET}"
+    echo ""
+
+    # registry tweaks
+    step "configuration"
+    run wine reg add "HKCU\\Software\\Wine\\WineDbg" /v ShowCrashDialog /t REG_DWORD /d 0 /f || true
+    run wine reg add "HKLM\\System\\CurrentControlSet\\Services\\PlugPlay" /v Start /t REG_DWORD /d 4 /f || true
+    run wine reg add "HKLM\\System\\CurrentControlSet\\Services\\WineBus" /v Start /t REG_DWORD /d 4 /f || true
+    cat > "$WINEPREFIX/dxvk.conf" << 'DXVKEOF'
+dxgi.deferSurfaceCreation = True
+dxvk.enableGraphicsPipelineLibrary = True
+dxvk.numCompilerThreads = 0
+DXVKEOF
+    ok "registry + dxvk.conf"
+    install_cjk_font_fix
+
+    # fall through to step 6 and step 7, heh 6 7 >:D
+fi
+
+if [[ $UPDATE_ONLY -eq 0 ]]; then
 
 # banner + version select
 
@@ -288,7 +468,6 @@ if [[ "$CSP_VERSION" != "custom" ]]; then
     CSP_URL="https://vd.clipstudio.net/clipcontent/paint/app/${CSP_VERSION}/CSP_${CSP_VERSION}w_setup.exe"
     CSP_EXE_NAME="CSP_${CSP_VERSION}w_setup.exe"
 fi
-
 # [1/7] dependencies
 
 step "dependencies"
@@ -296,13 +475,14 @@ info "checking for required system packages..."
 
 _missing=()
 command -v wget >/dev/null 2>&1 || _missing+=(wget)
+command -v curl >/dev/null 2>&1 || _missing+=(curl)
 _gst_ok         || _missing+=("gstreamer plugins")
 
 if [[ ${#_missing[@]} -gt 0 ]]; then
     warn "missing: ${_missing[*]}"
     _pm="$(_detect_pm)"
     if [[ "$_pm" == "unknown" ]]; then
-        die "unsupported distro, install wget and gstreamer plugins manually"
+        die "unsupported distro, install wget, curl, and gstreamer plugins manually"
     fi
     printf "  ${TEAL}│${RESET} "
     read -rp "  install automatically? [Y/n]: " _ans </dev/tty
@@ -477,7 +657,7 @@ if [[ $SKIP_WINETRICKS -eq 1 ]]; then
 else
     _wt_log="$WINEPREFIX/winetricks.log"
     _wt_needed=()
-    for pkg in corefonts cjkfonts vcrun2022 dotnet48 dxvk vkd3d; do
+    for pkg in corefonts vcrun2022 dotnet48 dxvk vkd3d; do
         grep -qx "$pkg" "$_wt_log" 2>/dev/null || _wt_needed+=("$pkg")
     done
     if [[ ${#_wt_needed[@]} -eq 0 ]]; then
@@ -488,13 +668,20 @@ else
     fi
 fi
 
-# compatibility settings (must be after winetricks — dotnet48 resets the version)
+# compatibility settings (must be after winetricks, dotnet48 resets the version)
 if [[ $DRY_RUN -eq 0 ]]; then
     run wine reg add "HKCU\\Software\\Wine" /v Version /t REG_SZ /d "win10" /f || warn "failed to set windows version"
     run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "concrt140" /t REG_SZ /d "native,builtin" /f || warn "failed to set concrt140 override"
     run wine reg add "HKCU\\Software\\Wine\\WineDbg" /v ShowCrashDialog /t REG_DWORD /d 0 /f || warn "failed to suppress crash dialog"
+
+    # Disable unnecessary Wine services that slow down startup
+    run wine reg add "HKLM\\System\\CurrentControlSet\\Services\\PlugPlay" /v Start /t REG_DWORD /d 4 /f || true
+    run wine reg add "HKLM\\System\\CurrentControlSet\\Services\\WineBus" /v Start /t REG_DWORD /d 4 /f || true
+
     cat > "$WINEPREFIX/dxvk.conf" << 'EOF'
 dxgi.deferSurfaceCreation = True
+dxvk.enableGraphicsPipelineLibrary = True
+dxvk.numCompilerThreads = 0
 EOF
 fi
 ok "windows version: win10"
@@ -503,6 +690,7 @@ ok "dll overrides + dxvk.conf"
 if [[ $DRY_RUN -eq 1 ]]; then
     ok "dcomp.dll (login/store panels)"
     ok "mfplat + winegstreamer (video export)"
+    ok "CJK font: WenQuanYi Micro Hei (dry run)"
 else
     mkdir -p "$LAUNCHER_DIR"
 
@@ -542,6 +730,8 @@ else
     run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfplat" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfplat override"
     run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfreadwrite" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfreadwrite override"
     ok "mfplat + winegstreamer (video export)"
+
+    install_cjk_font_fix
 fi
 
 # [5/7] install CSP
@@ -585,6 +775,8 @@ else
     run wine reg add "HKCU\\Software\\Wine\\AppDefaults\\CLIPStudio.exe" /v Version /t REG_SZ /d "win81" /f || warn "failed to set CLIP STUDIO version"
 fi
 
+fi # end UPDATE_ONLY skip
+
 # [6/7] desktop integration
 
 step "desktop integration"
@@ -609,8 +801,14 @@ export WINEESYNC=1
 export WINEFSYNC=1
 export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
 export DXVK_ASYNC=1
+export DXVK_STATE_CACHE=1
 export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
-export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox"
+export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
+export mesa_glthread=true
+export __GL_SHADER_DISK_CACHE=1
+export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
+export RADV_PERFTEST=gpl
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-background-networking --no-first-run --disable-sync"
 CSP_EXE="$CSP_INSTALL_PATH"
 if [[ -n "\$1" ]] && command -v winepath &>/dev/null; then
     WIN_PATH="\$(WINEPREFIX="$WINEPREFIX" winepath --windows "\$1")"
@@ -660,7 +858,13 @@ export WINEESYNC=1
 export WINEFSYNC=1
 export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
 export DXVK_ASYNC=1
+export DXVK_STATE_CACHE=1
 export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
+export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
+export mesa_glthread=true
+export __GL_SHADER_DISK_CACHE=1
+export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
+export RADV_PERFTEST=gpl
 export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu"
 exec wine "$STUDIO_EXE"
 LAUNCHEOF
@@ -813,8 +1017,13 @@ fi
 info "pre-warming the wineserver at login"
 info "reduces startup time by ~5-10s."
 gap
-printf "  ${TEAL}│${RESET}   "
-read -rp "enable wineserver pre-warm? [Y/n] " _prewarm </dev/tty
+if [[ $UPDATE_ONLY -eq 1 ]] && systemctl --user is-enabled csp-wineserver.service &>/dev/null; then
+    _prewarm="y"
+    info "updating existing wineserver service"
+else
+    printf "  ${TEAL}│${RESET}   "
+    read -rp "enable wineserver pre-warm? [Y/n] " _prewarm </dev/tty
+fi
 if [[ "${_prewarm,,}" != "n" ]]; then
     if [[ $DRY_RUN -eq 1 ]]; then
         ok "wineserver service (dry run)"
@@ -827,11 +1036,12 @@ After=default.target
 
 [Service]
 Type=simple
+Environment=PATH=$WINE_DIR/bin:/usr/bin
 Environment=WINEPREFIX=$WINEPREFIX
 Environment=WINESERVER=$WINESERVER_BIN
 Environment=WINEDEBUG=-all
 ExecStartPre=-$WINESERVER_BIN -k
-ExecStart=$WINESERVER_BIN -f
+ExecStart=$WINESERVER_BIN -f -p
 Restart=always
 RestartSec=5s
 
