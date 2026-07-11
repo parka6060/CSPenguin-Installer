@@ -4,12 +4,14 @@ set -euo pipefail
 VERBOSE=0
 SKIP_WINETRICKS=0
 DRY_RUN=0
+UPDATE_WINE=0
 UPDATE_ONLY=0
 _ESYNC_RESTART=0
 for arg in "$@"; do
     [[ "$arg" == "--verbose"         || "$arg" == "-v" ]] && VERBOSE=1
     [[ "$arg" == "--skip-winetricks" || "$arg" == "-s" ]] && SKIP_WINETRICKS=1
     [[ "$arg" == "--dry-run"         || "$arg" == "-n" ]] && DRY_RUN=1
+    [[ "$arg" == "--update-wine"     || "$arg" == "-w" ]] && UPDATE_WINE=1
     [[ "$arg" == "--update"          || "$arg" == "-u" ]] && UPDATE_ONLY=1
 done
 
@@ -77,14 +79,17 @@ fi
 WINEPREFIX="${WINEPREFIX:-$HOME/.wine-csp}"
 WINEARCH=win64
 
-WINE_VERSION="11.4"
+WINE_VERSION="11.12"
 WINE_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
+FREETYPE_VERSION="2.13.2"
+FREETYPE_URL="https://archive.archlinux.org/packages/f/freetype2/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
 WEBVIEW2_URL="https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/76eb3dc4-7851-45b7-a392-460523b0e2bb/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
 WINETRICKS_URL="https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks"
 LAUNCHER_DIR="$HOME/.local/share/cspenguin"
 WINE_DIR="$LAUNCHER_DIR/wine-${WINE_VERSION}"
 WINE_BIN="$WINE_DIR/bin/wine"
 WINESERVER_BIN="$WINE_DIR/bin/wineserver"
+FREETYPE_DIR="$WINE_DIR/lib/freetype2-${FREETYPE_VERSION}"
 WINETRICKS_BIN="$LAUNCHER_DIR/winetricks"
 LAUNCH_SCRIPT="$LAUNCHER_DIR/csp-launch.sh"
 LAUNCHER_STUDIO="$LAUNCHER_DIR/clipstudio-launch.sh"
@@ -381,6 +386,226 @@ else
     echo "CSPenguin-Installer > $(date)" >> "$LOG_FILE"
 fi
 
+# ============================================================
+# detect latest Wine version from Kron4ek (excluding Proton)
+# ============================================================
+_latest_kron4ek_wine() {
+    local _tags
+    _tags=$(curl -s "https://api.github.com/repos/Kron4ek/Wine-Builds/releases" 2>/dev/null \
+            | grep -oP '"tag_name":\s*"\K[^"]+' | grep -v '^proton' | head -20)
+    if [[ -n "$_tags" ]]; then
+        echo "$_tags" | head -1
+    fi
+}
+
+# ============================================================
+# find the closest available patch version numerically
+# ============================================================
+_closest_patch_version() {
+    local _target="$1"
+    local _best="" _best_dist=999999
+    for _pd in "$SCRIPT_DIR"/patches/x86_64-windows-wine*; do
+        [[ -d "$_pd" ]] || continue
+        [[ -f "$_pd/mfplat.dll" ]] || continue
+        _ver="${_pd##*wine}"
+        _dist=$(( _target > _ver ? _target - _ver : _ver - _target ))
+        if (( _dist < _best_dist )); then
+            _best="$_pd"
+            _best_dist=$_dist
+        fi
+    done
+    echo "$_best"
+}
+
+# ============================================================
+# fetch a patch file from local or remote
+# ============================================================
+_try_fetch_patch() {
+    local _dir="$1" _rel="$2" _file="$3"
+    [[ -f "$_dir/$_file" ]] && return 0
+    mkdir -p "$_dir"
+    local _tmp="${_dir}/${_file}.part"
+    if wget -q -O "$_tmp" "$GH_RAW/$_rel/$_file" 2>/dev/null; then
+        mv "$_tmp" "$_dir/$_file"
+        return 0
+    fi
+    rm -f "$_tmp" 2>/dev/null
+    return 1
+}
+
+# ============================================================
+# extract Wine tarball to LAUNCHER_DIR
+# ============================================================
+_extract_wine() {
+    local _wine_tar="$1"
+    info "extracting Wine ${WINE_VERSION}..."
+    rm -rf "$WINE_DIR"
+    mkdir -p "$LAUNCHER_DIR"
+    tar -xf "$_wine_tar" -C "$LAUNCHER_DIR"
+    for _d in "$LAUNCHER_DIR/wine-${WINE_VERSION}-staging-amd64" \
+               "$LAUNCHER_DIR/wine-${WINE_VERSION}-amd64" \
+               "$LAUNCHER_DIR/wine-${WINE_VERSION}-plain-amd64"; do
+        [[ -d "$_d" ]] && mv "$_d" "$WINE_DIR" && break
+    done
+    [[ -x "$WINE_BIN" ]] || die "Wine ${WINE_VERSION} extraction failed"
+    ok "Wine ${WINE_VERSION} extracted"
+}
+
+# ============================================================
+# bundle FreeType into WINE_DIR
+# ============================================================
+_bundle_freetype() {
+    local _freetype_tar="$DOWNLOAD_DIR/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
+    if [[ ! -f "$_freetype_tar" ]]; then
+        download_progress "FreeType ${FREETYPE_VERSION}" "$FREETYPE_URL" "$_freetype_tar"
+    else
+        ok "FreeType ${FREETYPE_VERSION} (cached)"
+    fi
+    info "bundling FreeType ${FREETYPE_VERSION}..."
+    rm -rf "$FREETYPE_DIR"
+    mkdir -p "$FREETYPE_DIR"
+    mkdir -p /tmp/freetype-extract
+    unzstd -c "$_freetype_tar" | tar -xf - -C /tmp/freetype-extract
+    cp /tmp/freetype-extract/usr/lib/libfreetype.so* "$FREETYPE_DIR/"
+    rm -rf /tmp/freetype-extract
+    ok "FreeType ${FREETYPE_VERSION} bundled"
+}
+
+# ============================================================
+# install mfplat/winegstreamer patches for current Wine version
+# ============================================================
+_install_patches() {
+    local _patches_win="$SCRIPT_DIR/patches/x86_64-windows-wine${WINE_VERSION}"
+    local _patches_unix="$SCRIPT_DIR/patches/x86_64-unix-wine${WINE_VERSION}"
+
+    if [[ ! -d "$_patches_win" ]] || [[ ! -f "$_patches_win/mfplat.dll" ]]; then
+        local _closest
+        _closest=$(_closest_patch_version "$WINE_VERSION")
+        if [[ -n "$_closest" ]]; then
+            _patches_win="$_closest"
+            _patches_unix="${_closest/x86_64-windows/x86_64-unix}"
+            warn "no patches for Wine ${WINE_VERSION}, using $(basename "$_patches_win")"
+        fi
+    fi
+
+    local _ok=0
+    if [[ -d "$_patches_win" ]] && [[ -f "$_patches_win/mfplat.dll" ]]; then
+        mkdir -p "$SYS32"
+        local _wine_win="$WINE_DIR/lib/wine/x86_64-windows"
+        [[ -d "$_wine_win" ]] || _wine_win="$WINE_DIR/lib64/wine/x86_64-windows"
+        local _wine_unix="$WINE_DIR/lib/wine/x86_64-unix"
+        [[ -d "$_wine_unix" ]] || _wine_unix="$WINE_DIR/lib64/wine/x86_64-unix"
+
+        if [[ -d "$_wine_win" ]]; then
+            for dll in mfplat.dll mfreadwrite.dll winegstreamer.dll; do
+                [[ -f "$_patches_win/$dll" ]] && cp "$_patches_win/$dll" "$_wine_win/$dll" && cp "$_patches_win/$dll" "$SYS32/$dll"
+            done
+            _ok=1
+        fi
+        if [[ -d "$_patches_unix" ]] && [[ -d "$_wine_unix" ]]; then
+            [[ -f "$_patches_unix/winegstreamer.so" ]] && cp "$_patches_unix/winegstreamer.so" "$_wine_unix/winegstreamer.so"
+        fi
+    fi
+
+    if [[ $_ok -eq 1 ]]; then
+        run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfplat" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfplat override"
+        run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfreadwrite" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfreadwrite override"
+        ok "patches applied: video export"
+    else
+        warn "patches not available for Wine ${WINE_VERSION}, video export or rotated/circular text may not work"
+    fi
+}
+
+# ============================================================
+# --update-wine / -w : upgrade Wine without reinstalling CSP
+# ============================================================
+if [[ $UPDATE_WINE -eq 1 ]]; then
+    echo ""
+    echo -e "  ${TEAL}${BOLD}[*] Wine update mode${RESET}"
+    echo ""
+
+    # check for existing installation
+    if [[ ! -f "$LAUNCH_SCRIPT" ]]; then
+        die "no existing CSP installation found at $LAUNCHER_DIR\n       run the script without --update-wine to install CSP first"
+    fi
+
+    # detect currently installed Wine version
+    _current_wine=$(grep -oP 'wine-\K[0-9]+\.[0-9]+' "$LAUNCH_SCRIPT" 2>/dev/null | head -1)
+    [[ -z "$_current_wine" ]] && die "could not detect installed Wine version from $LAUNCH_SCRIPT"
+    info "currently installed: Wine $_current_wine"
+
+    # fetch latest from Kron4ek
+    info "checking for latest Wine release..."
+    _latest_wine=$(_latest_kron4ek_wine)
+    [[ -z "$_latest_wine" ]] && die "could not fetch latest Wine version from Kron4ek"
+    info "latest available:   Wine $_latest_wine"
+
+    if [[ "$_current_wine" == "$_latest_wine" ]]; then
+        ok "already at latest Wine $_latest_wine"
+        exit 0
+    fi
+
+    ok "upgrading Wine $_current_wine -> $_latest_wine"
+
+    # override global version vars
+    WINE_VERSION="$_latest_wine"
+    WINE_DIR="$LAUNCHER_DIR/wine-${WINE_VERSION}"
+    WINE_BIN="$WINE_DIR/bin/wine"
+    WINESERVER_BIN="$WINE_DIR/bin/wineserver"
+
+    # download new Wine
+    _wine_url="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
+    _wine_tar="$DOWNLOAD_DIR/wine-${WINE_VERSION}-amd64.tar.xz"
+    mkdir -p "$DOWNLOAD_DIR"
+    download_progress "Wine ${WINE_VERSION}" "$_wine_url" "$_wine_tar"
+
+    _extract_wine "$_wine_tar"
+    _bundle_freetype
+
+    # clean up old Wine version
+    _old_wine_dir="$LAUNCHER_DIR/wine-${_current_wine}"
+    if [[ -d "$_old_wine_dir" ]] && [[ "$_old_wine_dir" != "$WINE_DIR" ]]; then
+        rm -rf "$_old_wine_dir"
+        info "removed old Wine ${_current_wine}"
+    fi
+
+    export PATH="$WINE_DIR/bin:$PATH"
+    export WINEPREFIX WINEARCH WINESERVER="$WINESERVER_BIN"
+
+    # dcomp (login/store panels) – always needed
+    DCOMP_DLL="$SCRIPT_DIR/patches/dcomp/dcomp.dll"
+    PTHREAD_DLL="$SCRIPT_DIR/patches/dcomp/libwinpthread-1.dll"
+    ensure_asset "patches/dcomp/dcomp.dll"          "$DCOMP_DLL"
+    ensure_asset "patches/dcomp/libwinpthread-1.dll" "$PTHREAD_DLL"
+    [[ -f "$DCOMP_DLL" ]] || die "dcomp.dll not found"
+    cp "$DCOMP_DLL"    "$LAUNCHER_DIR/dcomp.dll"
+    mkdir -p "$SYS32"
+    cp "$DCOMP_DLL"    "$SYS32/dcomp.dll"
+    cp "$PTHREAD_DLL"  "$SYS32/libwinpthread-1.dll"
+    run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "dcomp" /t REG_SZ /d "native,builtin" /f || true
+    ok "dcomp.dll (login/store panels)"
+
+    _install_patches
+
+    # update launcher scripts to point to new Wine and FreeType
+    sed -i "s|wine-[0-9]\+\.[0-9]\+/bin|wine-${WINE_VERSION}/bin|g" "$LAUNCH_SCRIPT"
+    sed -i "s|wine-[0-9]\+\.[0-9]\+/bin|wine-${WINE_VERSION}/bin|g" "$LAUNCHER_STUDIO"
+    sed -i "s|wine-[0-9]\+\.[0-9]\+/lib|wine-${WINE_VERSION}/lib|g" "$LAUNCH_SCRIPT"
+    sed -i "s|wine-[0-9]\+\.[0-9]\+/lib|wine-${WINE_VERSION}/lib|g" "$LAUNCHER_STUDIO"
+    sed -i "s|freetype2-[0-9]\+\.[0-9]\+\.[0-9]\+|freetype2-${FREETYPE_VERSION}|g" "$LAUNCH_SCRIPT"
+    sed -i "s|freetype2-[0-9]\+\.[0-9]\+\.[0-9]\+|freetype2-${FREETYPE_VERSION}|g" "$LAUNCHER_STUDIO"
+    info "launcher scripts updated"
+
+    # refresh desktop database
+    update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+
+    # kill old wineserver, start new one
+    "$WINESERVER_BIN" -k 2>/dev/null || true
+
+    ok "update to Wine ${WINE_VERSION} complete!"
+    exit 0
+fi
+
 # --update: skip install steps, just regenerate launch scripts + config
 if [[ $UPDATE_ONLY -eq 1 ]]; then
     export PATH="$WINE_DIR/bin:$PATH"
@@ -430,7 +655,7 @@ echo -e "      \___)=(___/  ${DIM}and set system limits.${RESET}"
 echo ""
 echo ""
 echo -e "  ${BOLD}Which version of Clip Studio Paint?${RESET}"
-echo "    1) 5.0.1 (latest)"
+echo "    1) 5.0.4 (latest)"
 echo "    2) 4.1.0 (previous stable)"
 echo "    3) custom installer path or URL"
 echo ""
@@ -440,7 +665,7 @@ while true; do
     read -rp "  choice [1]: " choice </dev/tty
     choice="${choice:-1}"
     case "$choice" in
-        1) CSP_VERSION="501"; break ;;
+        1) CSP_VERSION="504"; break ;;
         2) CSP_VERSION="410"; break ;;
         3)
             read -rp "  path or URL: " custom </dev/tty
@@ -578,17 +803,8 @@ if [[ ${#_dl_pids[@]} -gt 0 ]]; then
 fi
 
 if [[ $_need_wine -eq 1 ]] && [[ $DRY_RUN -eq 0 ]]; then
-    info "extracting Wine ${WINE_VERSION}..."
-    rm -rf "$WINE_DIR"
-    mkdir -p "$LAUNCHER_DIR"
-    tar -xf "$_wine_tar" -C "$LAUNCHER_DIR"
-    for _d in "$LAUNCHER_DIR/wine-${WINE_VERSION}-staging-amd64" \
-               "$LAUNCHER_DIR/wine-${WINE_VERSION}-amd64" \
-               "$LAUNCHER_DIR/wine-${WINE_VERSION}-plain-amd64"; do
-        [[ -d "$_d" ]] && mv "$_d" "$WINE_DIR" && break
-    done
-    [[ -x "$WINE_BIN" ]] || die "Wine ${WINE_VERSION} extraction failed"
-    ok "Wine ${WINE_VERSION} extracted"
+    _extract_wine "$_wine_tar"
+    _bundle_freetype
 fi
 
 if [[ $DRY_RUN -eq 0 ]]; then
@@ -702,31 +918,7 @@ else
     run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "dcomp" /t REG_SZ /d "native,builtin" /f || warn "failed to set dcomp override"
     ok "dcomp.dll (login/store panels)"
 
-    PATCHES_WIN="$SCRIPT_DIR/patches/x86_64-windows-wine11.4"
-    PATCHES_UNIX="$SCRIPT_DIR/patches/x86_64-unix-wine11.4"
-    ensure_asset "patches/x86_64-windows-wine11.4/mfplat.dll" "$PATCHES_WIN/mfplat.dll"
-    ensure_asset "patches/x86_64-windows-wine11.4/mfreadwrite.dll" "$PATCHES_WIN/mfreadwrite.dll"
-    ensure_asset "patches/x86_64-windows-wine11.4/winegstreamer.dll" "$PATCHES_WIN/winegstreamer.dll"
-    ensure_asset "patches/x86_64-unix-wine11.4/winegstreamer.so" "$PATCHES_UNIX/winegstreamer.so"
-
-    WINE_WIN="$WINE_DIR/lib/wine/x86_64-windows"
-    [[ -d "$WINE_WIN" ]] || WINE_WIN="$WINE_DIR/lib64/wine/x86_64-windows"
-    WINE_UNIX="$WINE_DIR/lib/wine/x86_64-unix"
-    [[ -d "$WINE_UNIX" ]] || WINE_UNIX="$WINE_DIR/lib64/wine/x86_64-unix"
-
-    if [[ -d "$PATCHES_WIN" ]] && [[ -d "$WINE_WIN" ]]; then
-        for dll in mfplat.dll mfreadwrite.dll winegstreamer.dll; do
-            [[ -f "$PATCHES_WIN/$dll" ]] && cp "$PATCHES_WIN/$dll" "$WINE_WIN/$dll" && cp "$PATCHES_WIN/$dll" "$SYS32/$dll"
-        done
-    fi
-    if [[ -d "$PATCHES_UNIX" ]] && [[ -d "$WINE_UNIX" ]] && [[ -f "$PATCHES_UNIX/winegstreamer.so" ]]; then
-        cp "$PATCHES_UNIX/winegstreamer.so" "$WINE_UNIX/winegstreamer.so"
-    fi
-
-    run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfplat" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfplat override"
-    run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfreadwrite" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfreadwrite override"
-    ok "mfplat + winegstreamer (video export)"
-
+    _install_patches
     install_cjk_font_fix
 fi
 
@@ -817,6 +1009,7 @@ fi
 
 cat > "$LAUNCH_SCRIPT" << LAUNCHEOF
 #!/usr/bin/env bash
+export LD_LIBRARY_PATH="$FREETYPE_DIR:\${LD_LIBRARY_PATH:-}"
 export PATH="$WINE_DIR/bin:\$PATH"
 export WINESERVER="$WINESERVER_BIN"
 export WINEPREFIX="$WINEPREFIX"
@@ -870,6 +1063,7 @@ chmod +x "$LAUNCH_SCRIPT"
 
 cat > "$LAUNCHER_STUDIO" << LAUNCHEOF
 #!/usr/bin/env bash
+export LD_LIBRARY_PATH="$FREETYPE_DIR:\${LD_LIBRARY_PATH:-}"
 export PATH="$WINE_DIR/bin:\$PATH"
 export WINESERVER="$WINESERVER_BIN"
 export WINEPREFIX="$WINEPREFIX"
@@ -934,47 +1128,78 @@ if [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]]; then
     fi
 
     if [[ -n "$_kwc" ]]; then
-        if ! grep -q "CSPenguin:" "$_kwinrc" 2>/dev/null; then
-            _uuid_below="cspenguin-$(uuidgen 2>/dev/null || echo below-rule)"
+        _write_kwin_subwindow_rule() {
+            local uuid="$1"
+            $_kwc --file kwinrulesrc --group "$uuid" --key Description "CSPenguin: CSP subwindows on top"
+            $_kwc --file kwinrulesrc --group "$uuid" --key below false
+            $_kwc --file kwinrulesrc --group "$uuid" --key belowrule 3
+            $_kwc --file kwinrulesrc --group "$uuid" --key above true
+            $_kwc --file kwinrulesrc --group "$uuid" --key aboverule 3
+            $_kwc --file kwinrulesrc --group "$uuid" --key fsplevel 3
+            $_kwc --file kwinrulesrc --group "$uuid" --key fsplevelrule 2
+            $_kwc --file kwinrulesrc --group "$uuid" --key hastransientparent true
+            $_kwc --file kwinrulesrc --group "$uuid" --key hastransientparentmatch 1
+            $_kwc --file kwinrulesrc --group "$uuid" --key skiptaskbar true
+            $_kwc --file kwinrulesrc --group "$uuid" --key skiptaskbarrule 3
+            $_kwc --file kwinrulesrc --group "$uuid" --key wmclass "clipstudiopaint.exe clipstudiopaint.exe"
+            $_kwc --file kwinrulesrc --group "$uuid" --key wmclasscomplete true
+            $_kwc --file kwinrulesrc --group "$uuid" --key wmclassmatch 1
+        }
 
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key Description "CSPenguin: CSP below for popups"
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key below true
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key belowrule 3
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key fullscreen false
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key fullscreenrule 3
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key wmclass "clipstudiopaint.exe"
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key wmclassmatch 2
-
-            _existing_rules=$($_krc --file kwinrulesrc --group General --key rules 2>/dev/null || true)
-            _existing_count=$($_krc --file kwinrulesrc --group General --key count 2>/dev/null || echo 0)
-            _new_count=$((_existing_count + 1))
-            if [[ -n "$_existing_rules" ]]; then
-                _new_rules="${_existing_rules},${_uuid_below}"
-            else
-                _new_rules="${_uuid_below}"
+        _register_kwin_rule() {
+            local uuid="$1"
+            local rules=$($_krc --file kwinrulesrc --group General --key rules 2>/dev/null || true)
+            local count=$($_krc --file kwinrulesrc --group General --key count 2>/dev/null || echo 0)
+            if [[ "$rules" != *"$uuid"* ]]; then
+                local new_count=$((count + 1))
+                local new_rules="${rules:+$rules,}$uuid"
+                $_kwc --file kwinrulesrc --group General --key count "$new_count"
+                $_kwc --file kwinrulesrc --group General --key rules "$new_rules"
             fi
-            $_kwc --file kwinrulesrc --group General --key count "$_new_count"
-            $_kwc --file kwinrulesrc --group General --key rules "$_new_rules"
+        }
 
+        _reload_kwin() {
             qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || \
                 dbus-send --type=method_call --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
-            ok "KDE window rules"
-        else
+        }
+
+        _csp_uuid=""
+        _is_old_rule=0
+        if grep -q "CSPenguin:" "$_kwinrc" 2>/dev/null; then
             _csp_uuid=$(awk -F'[][]' '/^\[/{grp=$2} /CSPenguin:/{print grp; exit}' "$_kwinrc" 2>/dev/null || true)
             if [[ -n "$_csp_uuid" ]]; then
-                _fs_val=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key fullscreen 2>/dev/null || true)
-                if [[ "$_fs_val" != "false" ]]; then
-                    $_kwc --file kwinrulesrc --group "$_csp_uuid" --key fullscreen false
-                    $_kwc --file kwinrulesrc --group "$_csp_uuid" --key fullscreenrule 3
-                    qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || \
-                        dbus-send --type=method_call --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
+                _below_val=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key below 2>/dev/null || true)
+                [[ "$_below_val" == "true" ]] && _is_old_rule=1
+            fi
+        fi
+
+        if [[ -n "$_csp_uuid" ]]; then
+            if [[ $_is_old_rule -eq 1 ]]; then
+                warn "migrating old CSPenguin window rule..."
+                _write_kwin_subwindow_rule "$_csp_uuid"
+                _reload_kwin
+                ok "KDE window rules (migrated)"
+            else
+                _wmclass=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key wmclass 2>/dev/null || true)
+                _wmclasscomplete=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key wmclasscomplete 2>/dev/null || true)
+                _above_val=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key above 2>/dev/null || true)
+
+                if [[ "$_wmclass" != "clipstudiopaint.exe clipstudiopaint.exe" ]] || \
+                   [[ "$_wmclasscomplete" != "true" ]] || \
+                   [[ "$_above_val" != "true" ]]; then
+                    _write_kwin_subwindow_rule "$_csp_uuid"
+                    _reload_kwin
                     ok "KDE window rules (updated)"
                 else
                     ok "KDE window rules (already set)"
                 fi
-            else
-                ok "KDE window rules (already set)"
             fi
+        else
+            _uuid_above="cspenguin-$(uuidgen 2>/dev/null || echo above-rule)"
+            _write_kwin_subwindow_rule "$_uuid_above"
+            _register_kwin_rule "$_uuid_above"
+            _reload_kwin
+            ok "KDE window rules"
         fi
     else
         warn "kwriteconfig not found, set window rules manually"
