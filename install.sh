@@ -402,12 +402,13 @@ _latest_kron4ek_wine() {
 # find the closest available patch version numerically
 # ============================================================
 _closest_patch_version() {
-    local _target="$1"
+    local _target="${1//./}"
     local _best="" _best_dist=999999
     for _pd in "$SCRIPT_DIR"/patches/x86_64-windows-wine*; do
         [[ -d "$_pd" ]] || continue
         [[ -f "$_pd/mfplat.dll" ]] || continue
         _ver="${_pd##*wine}"
+        _ver="${_ver//./}"
         _dist=$(( _target > _ver ? _target - _ver : _ver - _target ))
         if (( _dist < _best_dist )); then
             _best="$_pd"
