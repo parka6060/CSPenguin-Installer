@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 VERBOSE=0
 SKIP_WINETRICKS=0
@@ -39,24 +39,40 @@ _setup_colors
 TOTAL_STEPS=7
 STEP=0
 
+# _log writes a plain-text (no ANSI codes) trail of what happened to
+# LOG_FILE, independent of what run() captures from external commands.
+_log() { [[ -n "${LOG_FILE:-}" ]] && echo "$1" >> "$LOG_FILE" 2>/dev/null; }
+
 step() {
     STEP=$((STEP + 1))
     echo ""
     echo -e "  ${TEAL}│${RESET} ${TEAL}${BOLD}[${STEP}/${TOTAL_STEPS}] $1${RESET}"
+    _log "[STEP ${STEP}/${TOTAL_STEPS}] $1"
 }
 
-ok()   { echo -e "  ${TEAL}│${RESET} ${AMBER}+${RESET} $1"; }
-warn() { echo -e "  ${TEAL}│${RESET} ${YELLOW}!${RESET} ${YELLOW}$1${RESET}"; }
-info() { echo -e "  ${TEAL}│${RESET} ${DIM}- $1${RESET}"; }
+ok()   { echo -e "  ${TEAL}│${RESET} ${AMBER}+${RESET} $1"; _log "OK: $1"; }
+warn() { echo -e "  ${TEAL}│${RESET} ${YELLOW}!${RESET} ${YELLOW}$1${RESET}"; _log "WARN: $1"; }
+info() { echo -e "  ${TEAL}│${RESET} ${DIM}- $1${RESET}"; _log "INFO: $1"; }
 gap()  { echo -e "  ${TEAL}│${RESET}"; }
-msg()  { echo -e "  ${TEAL}│${RESET} $1"; }
+msg()  { echo -e "  ${TEAL}│${RESET} $1"; _log "$1"; }
 
 die() {
     echo ""
     echo -e "  ${RED}✗ ERROR:${RESET} $1"
     [[ -n "${LOG_FILE:-}" ]] && echo -e "  ${DIM}log: $LOG_FILE${RESET}"
     echo -e "  ${DIM}https://github.com/parka6060/CSPenguin-Installer/issues${RESET}"
+    _log "ERROR: $1"
     exit 1
+}
+
+# catch and log command failures
+_on_error() {
+    local _exit=$? _line="$1" _cmd="$2"
+    _log "UNEXPECTED ERROR at line ${_line} (exit ${_exit}): ${_cmd}"
+    echo ""
+    echo -e "  ${RED}✗ ERROR:${RESET} unexpected failure at line ${_line}: ${_cmd} (exit ${_exit})"
+    [[ -n "${LOG_FILE:-}" ]] && echo -e "  ${DIM}log: $LOG_FILE${RESET}"
+    echo -e "  ${DIM}https://github.com/parka6060/CSPenguin-Installer/issues${RESET}"
 }
 
 # cleanup
@@ -386,6 +402,27 @@ else
     echo "CSPenguin-Installer > $(date)" >> "$LOG_FILE"
 fi
 
+# catch anything set -e would otherwise abort on without a friendly message
+trap '_on_error "$LINENO" "$BASH_COMMAND"' ERR
+
+# detect Wine version of existing install is actually using
+_detect_installed_wine() {
+    [[ -f "$LAUNCH_SCRIPT" ]] || return 1
+    local _v
+    _v=$(grep -oP 'wine-\K[0-9]+\.[0-9]+' "$LAUNCH_SCRIPT" 2>/dev/null | head -1)
+    [[ -n "$_v" ]] || return 1
+    echo "$_v"
+}
+
+# compare two Wine version strings (e.g. "11.4" vs "11.12")
+# echoes 1 if $1 > $2, -1 if $1 < $2, 0 if equal
+_wine_version_cmp() {
+    [[ "$1" == "$2" ]] && { echo 0; return; }
+    local _newest
+    _newest=$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)
+    [[ "$_newest" == "$1" ]] && echo 1 || echo -1
+}
+
 # ============================================================
 # detect latest Wine version from Kron4ek (excluding Proton)
 # ============================================================
@@ -517,6 +554,50 @@ _install_patches() {
     fi
 }
 
+# existing install found and no mode flag given -- ask what to do
+if [[ $UPDATE_ONLY -eq 0 ]] && [[ $UPDATE_WINE -eq 0 ]] && [[ -f "$LAUNCH_SCRIPT" ]]; then
+    _found_wine=$(_detect_installed_wine || echo "unknown")
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}existing CSPenguin install found${RESET} ${DIM}(Wine $_found_wine, $LAUNCHER_DIR)${RESET}"
+    echo ""
+    echo "    1) update       - regenerate launch scripts/config only; keeps your CSP install and Wine version as-is (fast)"
+    echo "    2) update wine  - like update, but also upgrades the bundled Wine to the latest release"
+    echo "    3) reinstall    - wipe and do a full fresh install"
+    echo "    4) cancel"
+    echo ""
+    _choice=""
+    read -t 10 -rp "  choice [will automatically cancel in 10s]: " _choice </dev/tty || true
+    echo ""
+    _log "menu (existing install found): choice='${_choice:-<empty/timeout>}'"
+    case "${_choice:-4}" in
+        1) UPDATE_ONLY=1; info "selected: update" ;;
+        2) UPDATE_WINE=1; info "selected: update wine" ;;
+        3) ok "proceeding with fresh install" ;;
+        *) info "cancelled"; exit 0 ;;
+    esac
+fi
+
+# --update/--update-wine given but no existing install found
+if [[ $UPDATE_ONLY -eq 1 || $UPDATE_WINE -eq 1 ]] && [[ ! -f "$LAUNCH_SCRIPT" ]]; then
+    _flag_name="--update"
+    [[ $UPDATE_WINE -eq 1 ]] && _flag_name="--update-wine"
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}no existing CSPenguin install found${RESET} ${DIM}($LAUNCHER_DIR)${RESET}"
+    echo "  $_flag_name needs an existing install to update."
+    echo ""
+    echo "    1) install now - run a full fresh install instead"
+    echo "    2) cancel"
+    echo ""
+    _choice=""
+    read -t 10 -rp "  choice [will automatically cancel in 10s]: " _choice </dev/tty || true
+    echo ""
+    _log "menu (no existing install, $_flag_name given): choice='${_choice:-<empty/timeout>}'"
+    case "${_choice:-2}" in
+        1) UPDATE_ONLY=0; UPDATE_WINE=0; ok "proceeding with fresh install" ;;
+        *) info "cancelled"; exit 0 ;;
+    esac
+fi
+
 # ============================================================
 # --update-wine / -w : upgrade Wine without reinstalling CSP
 # ============================================================
@@ -525,90 +606,122 @@ if [[ $UPDATE_WINE -eq 1 ]]; then
     echo -e "  ${TEAL}${BOLD}[*] Wine update mode${RESET}"
     echo ""
 
-    # check for existing installation
-    if [[ ! -f "$LAUNCH_SCRIPT" ]]; then
-        die "no existing CSP installation found at $LAUNCHER_DIR\n       run the script without --update-wine to install CSP first"
+    # detect currently installed Wine version
+    _current_wine=$(_detect_installed_wine) \
+        || die "could not detect installed Wine version from $LAUNCH_SCRIPT"
+    info "currently installed:     Wine $_current_wine"
+    info "this installer supports: Wine $WINE_VERSION"
+
+    # informational only -- let the user know if upstream has moved past
+    # what this installer currently supports
+    info "checking upstream for newer Wine releases..."
+    _upstream_latest=$(_latest_kron4ek_wine || true)
+    if [[ -n "$_upstream_latest" ]] && [[ "$_upstream_latest" != "$WINE_VERSION" ]]; then
+        warn "Wine $_upstream_latest is available upstream, but this installer's patches are only tested against Wine $WINE_VERSION"
+        info "check https://github.com/parka6060/CSPenguin-Installer for an updated installer script"
     fi
 
-    # detect currently installed Wine version
-    _current_wine=$(grep -oP 'wine-\K[0-9]+\.[0-9]+' "$LAUNCH_SCRIPT" 2>/dev/null | head -1)
-    [[ -z "$_current_wine" ]] && die "could not detect installed Wine version from $LAUNCH_SCRIPT"
-    info "currently installed: Wine $_current_wine"
+    if [[ "$_current_wine" == "$WINE_VERSION" ]]; then
+        echo ""
+        echo -e "  ${YELLOW}${BOLD}already at supported Wine $WINE_VERSION${RESET} ${DIM}-- nothing to update${RESET}"
+        echo ""
+        echo "    1) update    - regenerate launch scripts/config anyway"
+        echo "    2) reinstall - wipe and do a full fresh install"
+        echo "    3) cancel"
+        echo ""
+        _choice=""
+        read -t 10 -rp "  choice [will automatically cancel in 10s]: " _choice </dev/tty || true
+        echo ""
+        _log "menu (already at supported Wine $WINE_VERSION): choice='${_choice:-<empty/timeout>}'"
+        case "${_choice:-3}" in
+            1) UPDATE_WINE=0; UPDATE_ONLY=1; info "selected: update" ;;
+            2) UPDATE_WINE=0; UPDATE_ONLY=0; ok "proceeding with fresh install" ;;
+            *) info "cancelled"; exit 0 ;;
+        esac
+    else
+        if [[ "$(_wine_version_cmp "$WINE_VERSION" "$_current_wine")" == "-1" ]]; then
+            echo ""
+            echo -e "  ${YELLOW}${BOLD}current wine version: $_current_wine is newer than the recommended wine version: $WINE_VERSION${RESET}"
+            echo -e "  ${DIM}continuing will downgrade to $WINE_VERSION to ensure compatibility.${RESET}"
+            echo ""
+            _confirm=""
+            read -t 10 -rp "  continue with downgrade? [y/N, cancels in 10s]: " _confirm </dev/tty || true
+            _log "downgrade confirmation ($_current_wine -> $WINE_VERSION): answer='${_confirm:-<empty/timeout>}'"
+            [[ "$_confirm" =~ ^[Yy]$ ]] || { info "cancelled"; exit 0; }
+            ok "downgrading Wine $_current_wine -> $WINE_VERSION"
+        else
+            ok "upgrading Wine $_current_wine -> $WINE_VERSION"
+        fi
 
-    # fetch latest from Kron4ek
-    info "checking for latest Wine release..."
-    _latest_wine=$(_latest_kron4ek_wine)
-    [[ -z "$_latest_wine" ]] && die "could not fetch latest Wine version from Kron4ek"
-    info "latest available:   Wine $_latest_wine"
+        # download new Wine
+        _wine_url="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
+        _wine_tar="$DOWNLOAD_DIR/wine-${WINE_VERSION}-amd64.tar.xz"
+        mkdir -p "$DOWNLOAD_DIR"
+        download_progress "Wine ${WINE_VERSION}" "$_wine_url" "$_wine_tar"
 
-    if [[ "$_current_wine" == "$_latest_wine" ]]; then
-        ok "already at latest Wine $_latest_wine"
+        _extract_wine "$_wine_tar"
+        _bundle_freetype
+
+        # clean up old Wine version
+        _old_wine_dir="$LAUNCHER_DIR/wine-${_current_wine}"
+        if [[ -d "$_old_wine_dir" ]] && [[ "$_old_wine_dir" != "$WINE_DIR" ]]; then
+            rm -rf "$_old_wine_dir"
+            info "removed old Wine ${_current_wine}"
+        fi
+
+        export PATH="$WINE_DIR/bin:$PATH"
+        export WINEPREFIX WINEARCH WINESERVER="$WINESERVER_BIN"
+
+        # dcomp (login/store panels) – always needed
+        DCOMP_DLL="$SCRIPT_DIR/patches/dcomp/dcomp.dll"
+        PTHREAD_DLL="$SCRIPT_DIR/patches/dcomp/libwinpthread-1.dll"
+        ensure_asset "patches/dcomp/dcomp.dll"          "$DCOMP_DLL"
+        ensure_asset "patches/dcomp/libwinpthread-1.dll" "$PTHREAD_DLL"
+        [[ -f "$DCOMP_DLL" ]] || die "dcomp.dll not found"
+        cp "$DCOMP_DLL"    "$LAUNCHER_DIR/dcomp.dll"
+        mkdir -p "$SYS32"
+        cp "$DCOMP_DLL"    "$SYS32/dcomp.dll"
+        cp "$PTHREAD_DLL"  "$SYS32/libwinpthread-1.dll"
+        run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "dcomp" /t REG_SZ /d "native,builtin" /f || true
+        ok "dcomp.dll (login/store panels)"
+
+        _install_patches
+
+        # update launcher scripts to point to new Wine and FreeType
+        sed -i "s|wine-[0-9]\+\.[0-9]\+/bin|wine-${WINE_VERSION}/bin|g" "$LAUNCH_SCRIPT"
+        sed -i "s|wine-[0-9]\+\.[0-9]\+/bin|wine-${WINE_VERSION}/bin|g" "$LAUNCHER_STUDIO"
+        sed -i "s|wine-[0-9]\+\.[0-9]\+/lib|wine-${WINE_VERSION}/lib|g" "$LAUNCH_SCRIPT"
+        sed -i "s|wine-[0-9]\+\.[0-9]\+/lib|wine-${WINE_VERSION}/lib|g" "$LAUNCHER_STUDIO"
+        sed -i "s|freetype2-[0-9]\+\.[0-9]\+\.[0-9]\+|freetype2-${FREETYPE_VERSION}|g" "$LAUNCH_SCRIPT"
+        sed -i "s|freetype2-[0-9]\+\.[0-9]\+\.[0-9]\+|freetype2-${FREETYPE_VERSION}|g" "$LAUNCHER_STUDIO"
+        info "launcher scripts updated"
+
+        # refresh desktop database
+        update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+
+        # kill old wineserver, start new one
+        "$WINESERVER_BIN" -k 2>/dev/null || true
+
+        ok "update to Wine ${WINE_VERSION} complete!"
         exit 0
     fi
-
-    ok "upgrading Wine $_current_wine -> $_latest_wine"
-
-    # override global version vars
-    WINE_VERSION="$_latest_wine"
-    WINE_DIR="$LAUNCHER_DIR/wine-${WINE_VERSION}"
-    WINE_BIN="$WINE_DIR/bin/wine"
-    WINESERVER_BIN="$WINE_DIR/bin/wineserver"
-
-    # download new Wine
-    _wine_url="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
-    _wine_tar="$DOWNLOAD_DIR/wine-${WINE_VERSION}-amd64.tar.xz"
-    mkdir -p "$DOWNLOAD_DIR"
-    download_progress "Wine ${WINE_VERSION}" "$_wine_url" "$_wine_tar"
-
-    _extract_wine "$_wine_tar"
-    _bundle_freetype
-
-    # clean up old Wine version
-    _old_wine_dir="$LAUNCHER_DIR/wine-${_current_wine}"
-    if [[ -d "$_old_wine_dir" ]] && [[ "$_old_wine_dir" != "$WINE_DIR" ]]; then
-        rm -rf "$_old_wine_dir"
-        info "removed old Wine ${_current_wine}"
-    fi
-
-    export PATH="$WINE_DIR/bin:$PATH"
-    export WINEPREFIX WINEARCH WINESERVER="$WINESERVER_BIN"
-
-    # dcomp (login/store panels) – always needed
-    DCOMP_DLL="$SCRIPT_DIR/patches/dcomp/dcomp.dll"
-    PTHREAD_DLL="$SCRIPT_DIR/patches/dcomp/libwinpthread-1.dll"
-    ensure_asset "patches/dcomp/dcomp.dll"          "$DCOMP_DLL"
-    ensure_asset "patches/dcomp/libwinpthread-1.dll" "$PTHREAD_DLL"
-    [[ -f "$DCOMP_DLL" ]] || die "dcomp.dll not found"
-    cp "$DCOMP_DLL"    "$LAUNCHER_DIR/dcomp.dll"
-    mkdir -p "$SYS32"
-    cp "$DCOMP_DLL"    "$SYS32/dcomp.dll"
-    cp "$PTHREAD_DLL"  "$SYS32/libwinpthread-1.dll"
-    run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "dcomp" /t REG_SZ /d "native,builtin" /f || true
-    ok "dcomp.dll (login/store panels)"
-
-    _install_patches
-
-    # update launcher scripts to point to new Wine and FreeType
-    sed -i "s|wine-[0-9]\+\.[0-9]\+/bin|wine-${WINE_VERSION}/bin|g" "$LAUNCH_SCRIPT"
-    sed -i "s|wine-[0-9]\+\.[0-9]\+/bin|wine-${WINE_VERSION}/bin|g" "$LAUNCHER_STUDIO"
-    sed -i "s|wine-[0-9]\+\.[0-9]\+/lib|wine-${WINE_VERSION}/lib|g" "$LAUNCH_SCRIPT"
-    sed -i "s|wine-[0-9]\+\.[0-9]\+/lib|wine-${WINE_VERSION}/lib|g" "$LAUNCHER_STUDIO"
-    sed -i "s|freetype2-[0-9]\+\.[0-9]\+\.[0-9]\+|freetype2-${FREETYPE_VERSION}|g" "$LAUNCH_SCRIPT"
-    sed -i "s|freetype2-[0-9]\+\.[0-9]\+\.[0-9]\+|freetype2-${FREETYPE_VERSION}|g" "$LAUNCHER_STUDIO"
-    info "launcher scripts updated"
-
-    # refresh desktop database
-    update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-
-    # kill old wineserver, start new one
-    "$WINESERVER_BIN" -k 2>/dev/null || true
-
-    ok "update to Wine ${WINE_VERSION} complete!"
-    exit 0
 fi
 
 # --update: skip install steps, just regenerate launch scripts + config
 if [[ $UPDATE_ONLY -eq 1 ]]; then
+    # WINE_VERSION above is the pin, not necessarily what's on disk -- if it
+    # doesn't exist, fall back to whatever Wine version is actually installed.
+    if [[ ! -d "$WINE_DIR" ]]; then
+        _installed_wine=$(_detect_installed_wine || true)
+        if [[ -n "$_installed_wine" ]] && [[ -d "$LAUNCHER_DIR/wine-${_installed_wine}" ]]; then
+            WINE_VERSION="$_installed_wine"
+            WINE_DIR="$LAUNCHER_DIR/wine-${WINE_VERSION}"
+            WINE_BIN="$WINE_DIR/bin/wine"
+            WINESERVER_BIN="$WINE_DIR/bin/wineserver"
+            FREETYPE_DIR="$WINE_DIR/lib/freetype2-${FREETYPE_VERSION}"
+        fi
+    fi
+
     export PATH="$WINE_DIR/bin:$PATH"
     export WINEPREFIX WINEARCH WINESERVER="$WINESERVER_BIN"
 

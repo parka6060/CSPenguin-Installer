@@ -53,11 +53,13 @@ This requires Wine and CSP to already be installed.
 
 ## Updating Wine
 
-To upgrade the bundled Wine to the latest release from Kron4ek without reinstalling CSP:
+To upgrade the bundled Wine without reinstalling CSP:
 
 ```bash
 ./install.sh --update-wine
 ```
+
+_Note: this will only update wine to newer versions that have already been tested for compatibility by the maintainers of this install script. If you wish to install an newer, unverified wine version, please do so manually._
 
 or
 
@@ -126,7 +128,7 @@ Or if you cloned the repo:
 ./uninstall.sh
 ```
 
-___
+---
 
 Brought to you by <https://eninabox.art/>
 
