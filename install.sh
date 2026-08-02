@@ -365,31 +365,34 @@ _gst_ok() { command -v gst-inspect-1.0 >/dev/null 2>&1 && gst-inspect-1.0 h264pa
 
 _install_deps_pacman() {
     local pkgs=()
-    command -v wget   >/dev/null 2>&1 || pkgs+=(wget)
-    command -v curl   >/dev/null 2>&1 || pkgs+=(curl)
-    command -v wmctrl >/dev/null 2>&1 || pkgs+=(wmctrl)
-    command -v xprop  >/dev/null 2>&1 || pkgs+=(xorg-xprop)
-    _gst_ok         || pkgs+=(gst-plugins-bad gst-plugins-good)
+    command -v wget    >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl    >/dev/null 2>&1 || pkgs+=(curl)
+    command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
+    command -v xprop   >/dev/null 2>&1 || pkgs+=(xorg-xprop)
+    command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    _gst_ok          || pkgs+=(gst-plugins-bad gst-plugins-good)
     [[ ${#pkgs[@]} -gt 0 ]] && sudo pacman -S --needed --noconfirm "${pkgs[@]}"
 }
 
 _install_deps_dnf() {
     local pkgs=()
-    command -v wget   >/dev/null 2>&1 || pkgs+=(wget)
-    command -v curl   >/dev/null 2>&1 || pkgs+=(curl)
-    command -v wmctrl >/dev/null 2>&1 || pkgs+=(wmctrl)
-    command -v xprop  >/dev/null 2>&1 || pkgs+=(xprop)
-    _gst_ok         || pkgs+=(gstreamer1-plugins-bad-free gstreamer1-plugins-good)
+    command -v wget    >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl    >/dev/null 2>&1 || pkgs+=(curl)
+    command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
+    command -v xprop   >/dev/null 2>&1 || pkgs+=(xprop)
+    command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    _gst_ok          || pkgs+=(gstreamer1-plugins-bad-free gstreamer1-plugins-good)
     [[ ${#pkgs[@]} -gt 0 ]] && sudo dnf install -y "${pkgs[@]}"
 }
 
 _install_deps_apt() {
     local pkgs=(dirmngr ca-certificates)
-    command -v wget   >/dev/null 2>&1 || pkgs+=(wget)
-    command -v curl   >/dev/null 2>&1 || pkgs+=(curl)
-    command -v wmctrl >/dev/null 2>&1 || pkgs+=(wmctrl)
-    command -v xprop  >/dev/null 2>&1 || pkgs+=(x11-utils)
-    _gst_ok         || pkgs+=(gstreamer1.0-plugins-bad gstreamer1.0-plugins-good)
+    command -v wget    >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl    >/dev/null 2>&1 || pkgs+=(curl)
+    command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
+    command -v xprop   >/dev/null 2>&1 || pkgs+=(x11-utils)
+    command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    _gst_ok          || pkgs+=(gstreamer1.0-plugins-bad gstreamer1.0-plugins-good)
     sudo apt install -y "${pkgs[@]}"
 }
 
@@ -510,19 +513,108 @@ _bundle_freetype() {
 }
 
 # ============================================================
-# install mfplat/winegstreamer patches for current Wine version
+# write both launcher scripts (PAINT + STUDIO)
 # ============================================================
+_write_launchers() {
+    cat > "$LAUNCH_SCRIPT" << LAUNCHEOF
+#!/usr/bin/env bash
+export LD_LIBRARY_PATH="$FREETYPE_DIR:\${LD_LIBRARY_PATH:-}"
+export PATH="$WINE_DIR/bin:\$PATH"
+export WINESERVER="$WINESERVER_BIN"
+export WINEPREFIX="$WINEPREFIX"
+export WINEDEBUG=-all
+export WINEESYNC=1
+export WINEFSYNC=1
+export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
+export DXVK_ASYNC=1
+export DXVK_STATE_CACHE=1
+export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
+export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
+export mesa_glthread=true
+export __GL_SHADER_DISK_CACHE=1
+export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
+export RADV_PERFTEST=gpl
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-background-networking --no-first-run --disable-sync"
+CSP_EXE="$CSP_INSTALL_PATH"
+if [[ -n "\$1" ]] && command -v winepath &>/dev/null; then
+    WIN_PATH="\$(WINEPREFIX="$WINEPREFIX" winepath --windows "\$1")"
+    wine "\$CSP_EXE" "\$WIN_PATH" &
+else
+    wine "\$CSP_EXE" &
+fi
+WINE_PID=\$!
+
+if command -v wmctrl &>/dev/null && command -v xprop &>/dev/null; then
+    (
+        while kill -0 "\$WINE_PID" 2>/dev/null; do
+            while IFS= read -r _wid; do
+                _st=\$(xprop -id "\$_wid" _NET_WM_STATE 2>/dev/null)
+                if [[ "\$_st" == *FULLSCREEN* ]]; then
+                    wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
+                    xprop -id "\$_wid" -spy _NET_WM_STATE 2>/dev/null | while IFS= read -r _line; do
+                        [[ "\$_line" == *FULLSCREEN* ]] && wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
+                    done
+                    exit 0
+                fi
+            done < <(xprop -root _NET_CLIENT_LIST 2>/dev/null | tr ',' '\n' | while IFS= read -r _r; do
+                _w=\$(echo "\$_r" | tr -d ' #')
+                [[ \$(xprop -id "0x\$_w" WM_CLASS 2>/dev/null) == *clipstudiopaint* ]] && echo "0x\$_w"
+            done)
+            sleep 0.5
+        done
+    ) &
+fi
+
+wait "\$WINE_PID"
+LAUNCHEOF
+    chmod +x "$LAUNCH_SCRIPT"
+
+    cat > "$LAUNCHER_STUDIO" << LAUNCHEOF
+#!/usr/bin/env bash
+export LD_LIBRARY_PATH="$FREETYPE_DIR:\${LD_LIBRARY_PATH:-}"
+export PATH="$WINE_DIR/bin:\$PATH"
+export WINESERVER="$WINESERVER_BIN"
+export WINEPREFIX="$WINEPREFIX"
+export WINEDEBUG=-all
+export WINEESYNC=1
+export WINEFSYNC=1
+export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
+export DXVK_ASYNC=1
+export DXVK_STATE_CACHE=1
+export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
+export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
+export mesa_glthread=true
+export __GL_SHADER_DISK_CACHE=1
+export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
+export RADV_PERFTEST=gpl
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu"
+exec wine "$STUDIO_EXE"
+LAUNCHEOF
+    chmod +x "$LAUNCHER_STUDIO"
+}
+
 _install_patches() {
     local _patches_win="$SCRIPT_DIR/patches/x86_64-windows-wine${WINE_VERSION}"
     local _patches_unix="$SCRIPT_DIR/patches/x86_64-unix-wine${WINE_VERSION}"
 
     if [[ ! -d "$_patches_win" ]] || [[ ! -f "$_patches_win/mfplat.dll" ]]; then
-        local _closest
-        _closest=$(_closest_patch_version "$WINE_VERSION")
-        if [[ -n "$_closest" ]]; then
-            _patches_win="$_closest"
-            _patches_unix="${_closest/x86_64-windows/x86_64-unix}"
-            warn "no patches for Wine ${WINE_VERSION}, using $(basename "$_patches_win")"
+        # try to fetch the exact version from remote
+        local _fallback="$DOWNLOAD_DIR/patches/x86_64-windows-wine${WINE_VERSION}"
+        if _try_fetch_patch "$_fallback" "patches/x86_64-windows-wine${WINE_VERSION}" "mfplat.dll" &&
+           _try_fetch_patch "$_fallback" "patches/x86_64-windows-wine${WINE_VERSION}" "mfreadwrite.dll" &&
+           _try_fetch_patch "$_fallback" "patches/x86_64-windows-wine${WINE_VERSION}" "winegstreamer.dll"; then
+            _patches_win="$_fallback"
+            local _ufallback="$DOWNLOAD_DIR/patches/x86_64-unix-wine${WINE_VERSION}"
+            _try_fetch_patch "$_ufallback" "patches/x86_64-unix-wine${WINE_VERSION}" "winegstreamer.so" || true
+            _patches_unix="$_ufallback"
+        else
+            local _closest
+            _closest=$(_closest_patch_version "$WINE_VERSION")
+            if [[ -n "$_closest" ]]; then
+                _patches_win="$_closest"
+                _patches_unix="${_closest/x86_64-windows/x86_64-unix}"
+                warn "no patches for Wine ${WINE_VERSION}, using $(basename "$_patches_win")"
+            fi
         fi
     fi
 
@@ -687,14 +779,8 @@ if [[ $UPDATE_WINE -eq 1 ]]; then
 
         _install_patches
 
-        # update launcher scripts to point to new Wine and FreeType
-        sed -i "s|wine-[0-9]\+\.[0-9]\+/bin|wine-${WINE_VERSION}/bin|g" "$LAUNCH_SCRIPT"
-        sed -i "s|wine-[0-9]\+\.[0-9]\+/bin|wine-${WINE_VERSION}/bin|g" "$LAUNCHER_STUDIO"
-        sed -i "s|wine-[0-9]\+\.[0-9]\+/lib|wine-${WINE_VERSION}/lib|g" "$LAUNCH_SCRIPT"
-        sed -i "s|wine-[0-9]\+\.[0-9]\+/lib|wine-${WINE_VERSION}/lib|g" "$LAUNCHER_STUDIO"
-        sed -i "s|freetype2-[0-9]\+\.[0-9]\+\.[0-9]\+|freetype2-${FREETYPE_VERSION}|g" "$LAUNCH_SCRIPT"
-        sed -i "s|freetype2-[0-9]\+\.[0-9]\+\.[0-9]\+|freetype2-${FREETYPE_VERSION}|g" "$LAUNCHER_STUDIO"
-        info "launcher scripts updated"
+        _write_launchers
+        info "launcher scripts regenerated"
 
         # refresh desktop database
         update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
@@ -749,6 +835,7 @@ dxvk.numCompilerThreads = 0
 DXVKEOF
     ok "registry + dxvk.conf"
     install_cjk_font_fix
+    _bundle_freetype
 
     # fall through to step 6 and step 7, heh 6 7 >:D
 fi
@@ -769,9 +856,16 @@ echo -e "      \___)=(___/  ${DIM}and set system limits.${RESET}"
 echo ""
 echo ""
 echo -e "  ${BOLD}Which version of Clip Studio Paint?${RESET}"
-echo "    1) 5.0.4 (latest)"
-echo "    2) 4.1.0 (previous stable)"
-echo "    3) custom installer path or URL"
+echo "    1) 5.1.0 (latest)"
+echo "    2) 5.0.4 (perpetual)"
+echo "    3) 4.1.0"
+echo "    4) 4.0.10 (perpetual)"
+echo "    5) 3.2.3"
+echo "    6) 3.0.8 (perpetual)"
+echo "    7) 2.3.4"
+echo "    8) 2.0.6 (perpetual)"
+echo "    9) 1.13.2"
+echo "    10) custom installer path or URL"
 echo ""
 
 CSP_VERSION="" CSP_URL="" CSP_EXE_NAME=""
@@ -779,9 +873,16 @@ while true; do
     read -rp "  choice [1]: " choice </dev/tty
     choice="${choice:-1}"
     case "$choice" in
-        1) CSP_VERSION="504"; break ;;
-        2) CSP_VERSION="410"; break ;;
-        3)
+        1) CSP_VERSION="510"; break ;;
+        2) CSP_VERSION="504"; break ;;
+        3) CSP_VERSION="410"; break ;;
+        4) CSP_VERSION="4010"; break ;;
+        5) CSP_VERSION="323"; break ;;
+        6) CSP_VERSION="308"; break ;;
+        7) CSP_VERSION="234"; break ;;
+        8) CSP_VERSION="206"; break ;;
+        9) CSP_VERSION="1132"; break ;;
+        10)
             read -rp "  path or URL: " custom </dev/tty
             if [[ "$custom" == http* ]]; then
                 CSP_URL="$custom"
@@ -799,7 +900,7 @@ while true; do
                 echo "  file not found: $custom"; continue
             fi
             break ;;
-        *) echo "  pick 1, 2, or 3" ;;
+        *) echo "  pick 1-10" ;;
     esac
 done
 
@@ -1121,82 +1222,7 @@ if [[ ! -f "$ICON_STUDIO_PATH" ]]; then
 fi
 # --- END UPDATED LOGIC ---
 
-cat > "$LAUNCH_SCRIPT" << LAUNCHEOF
-#!/usr/bin/env bash
-export LD_LIBRARY_PATH="$FREETYPE_DIR:\${LD_LIBRARY_PATH:-}"
-export PATH="$WINE_DIR/bin:\$PATH"
-export WINESERVER="$WINESERVER_BIN"
-export WINEPREFIX="$WINEPREFIX"
-export WINEDEBUG=-all
-export WINEESYNC=1
-export WINEFSYNC=1
-export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
-export DXVK_ASYNC=1
-export DXVK_STATE_CACHE=1
-export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
-export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
-export mesa_glthread=true
-export __GL_SHADER_DISK_CACHE=1
-export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
-export RADV_PERFTEST=gpl
-export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-background-networking --no-first-run --disable-sync"
-CSP_EXE="$CSP_INSTALL_PATH"
-if [[ -n "\$1" ]] && command -v winepath &>/dev/null; then
-    WIN_PATH="\$(WINEPREFIX="$WINEPREFIX" winepath --windows "\$1")"
-    wine "\$CSP_EXE" "\$WIN_PATH" &
-else
-    wine "\$CSP_EXE" &
-fi
-WINE_PID=\$!
-
-# Strip fullscreen state whenever CSP sets it (Wine maps borderless-maximized to fullscreen).
-if command -v wmctrl &>/dev/null && command -v xprop &>/dev/null; then
-    (
-        while kill -0 "\$WINE_PID" 2>/dev/null; do
-            while IFS= read -r _wid; do
-                _st=\$(xprop -id "\$_wid" _NET_WM_STATE 2>/dev/null)
-                if [[ "\$_st" == *FULLSCREEN* ]]; then
-                    wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
-                    xprop -id "\$_wid" -spy _NET_WM_STATE 2>/dev/null | while IFS= read -r _line; do
-                        [[ "\$_line" == *FULLSCREEN* ]] && wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
-                    done
-                    exit 0
-                fi
-            done < <(xprop -root _NET_CLIENT_LIST 2>/dev/null | tr ',' '\n' | while IFS= read -r _r; do
-                _w=\$(echo "\$_r" | tr -d ' #')
-                [[ \$(xprop -id "0x\$_w" WM_CLASS 2>/dev/null) == *clipstudiopaint* ]] && echo "0x\$_w"
-            done)
-            sleep 0.5
-        done
-    ) &
-fi
-
-wait "\$WINE_PID"
-LAUNCHEOF
-chmod +x "$LAUNCH_SCRIPT"
-
-cat > "$LAUNCHER_STUDIO" << LAUNCHEOF
-#!/usr/bin/env bash
-export LD_LIBRARY_PATH="$FREETYPE_DIR:\${LD_LIBRARY_PATH:-}"
-export PATH="$WINE_DIR/bin:\$PATH"
-export WINESERVER="$WINESERVER_BIN"
-export WINEPREFIX="$WINEPREFIX"
-export WINEDEBUG=-all
-export WINEESYNC=1
-export WINEFSYNC=1
-export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
-export DXVK_ASYNC=1
-export DXVK_STATE_CACHE=1
-export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
-export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
-export mesa_glthread=true
-export __GL_SHADER_DISK_CACHE=1
-export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
-export RADV_PERFTEST=gpl
-export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu"
-exec wine "$STUDIO_EXE"
-LAUNCHEOF
-chmod +x "$LAUNCHER_STUDIO"
+_write_launchers
 ok "launch scripts"
 
 DESKTOP_FILE="$HOME/.local/share/applications/clipstudiopaint.desktop"
@@ -1261,13 +1287,10 @@ if [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]]; then
         }
 
         _register_kwin_rule() {
-            local uuid="$1"
-            local rules=$($_krc --file kwinrulesrc --group General --key rules 2>/dev/null || true)
-            local count=$($_krc --file kwinrulesrc --group General --key count 2>/dev/null || echo 0)
+            local uuid="$1" rules
+            rules=$($_krc --file kwinrulesrc --group General --key rules 2>/dev/null || true)
             if [[ "$rules" != *"$uuid"* ]]; then
-                local new_count=$((count + 1))
                 local new_rules="${rules:+$rules,}$uuid"
-                $_kwc --file kwinrulesrc --group General --key count "$new_count"
                 $_kwc --file kwinrulesrc --group General --key rules "$new_rules"
             fi
         }
