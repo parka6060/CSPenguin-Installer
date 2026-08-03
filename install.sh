@@ -856,7 +856,7 @@ echo -e "      \___)=(___/  ${DIM}and set system limits.${RESET}"
 echo ""
 echo ""
 echo -e "  ${BOLD}Which version of Clip Studio Paint?${RESET}"
-echo "    1) 5.1.0 (latest)"
+echo "    1) 5.1.1 (latest)"
 echo "    2) 5.0.4 (perpetual)"
 echo "    3) 4.1.0"
 echo "    4) 4.0.10 (perpetual)"
@@ -873,7 +873,7 @@ while true; do
     read -rp "  choice [1]: " choice </dev/tty
     choice="${choice:-1}"
     case "$choice" in
-        1) CSP_VERSION="510"; break ;;
+        1) CSP_VERSION="511"; break ;;
         2) CSP_VERSION="504"; break ;;
         3) CSP_VERSION="410"; break ;;
         4) CSP_VERSION="4010"; break ;;
