@@ -371,6 +371,7 @@ _install_deps_pacman() {
     command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
     command -v xprop   >/dev/null 2>&1 || pkgs+=(xorg-xprop)
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    command -v file    >/dev/null 2>&1 || pkgs+=(file)
     _gst_ok          || pkgs+=(gst-plugins-bad gst-plugins-good)
     [[ ${#pkgs[@]} -gt 0 ]] && sudo pacman -S --needed --noconfirm "${pkgs[@]}"
 }
@@ -382,6 +383,7 @@ _install_deps_dnf() {
     command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
     command -v xprop   >/dev/null 2>&1 || pkgs+=(xprop)
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    command -v file    >/dev/null 2>&1 || pkgs+=(file)
     _gst_ok          || pkgs+=(gstreamer1-tools gstreamer1-plugins-bad-free gstreamer1-plugins-good)
     sudo dnf install -y "${pkgs[@]}"
 }
@@ -393,6 +395,7 @@ _install_deps_apt() {
     command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
     command -v xprop   >/dev/null 2>&1 || pkgs+=(x11-utils)
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    command -v file    >/dev/null 2>&1 || pkgs+=(file)
     _gst_ok          || pkgs+=(gstreamer1.0-plugins-bad gstreamer1.0-plugins-good)
     sudo apt install -y "${pkgs[@]}"
 }
@@ -934,6 +937,7 @@ command -v curl >/dev/null 2>&1 || _missing+=(curl)
 command -v unzstd >/dev/null 2>&1 || _missing+=(zstd)
 command -v wmctrl >/dev/null 2>&1 || _missing+=(wmctrl)
 command -v xprop >/dev/null 2>&1 || _missing+=(xprop)
+command -v file >/dev/null 2>&1 || _missing+=(file)
 _gst_ok         || _missing+=("gstreamer plugins")
 
 if [[ ${#_missing[@]} -gt 0 ]]; then
@@ -1217,28 +1221,33 @@ if [[ $DRY_RUN -eq 1 ]]; then
     ok ".clip thumbnails + MIME type (dry run)"
 else
 
-# --- UPDATED ICON PULL LOGIC ---
-ICON_PATH="$HOME/.local/share/icons/clipstudiopaint_macos.png"
-ICON_STUDIO_PATH="$HOME/.local/share/icons/clipstudio.png"
+# --- APP ICONS ---
+# We pull the icons from the Wikimedea Commons and avoid shipping them in the repo to comply with trademark laws.
+# This way if an icon is missing for some reason we still have a backup icon to use.
+ICON_THEME_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
+ICON_PAINT="$ICON_THEME_DIR/clipstudiopaint.png"
+ICON_STUDIO="$ICON_THEME_DIR/clipstudio.png"
+ICON_URL="https://upload.wikimedia.org/wikipedia/commons/1/14/Clipstudiopaint_app_logo.png"
+mkdir -p "$ICON_THEME_DIR"
 
-# Remote sources for icons
-URL_PAINT_ICON="https://images.icon-icons.com/3053/PNG/512/clip_studio_paint_macos_bigsur_icon_189480.png"
-URL_STUDIO_ICON="https://raw.githubusercontent.com/parka6060/CSPenguin-Installer/main/assets/clipstudio.png"
+_fetch_icon() {
+    local dest="$1"
+    if [[ -f "$dest" ]] && file "$dest" | grep -q 'PNG image'; then
+        ok "icon: $(basename "$dest") (cached)"
+        return
+    fi
+    local tmp="${dest}.part"
+    if wget -q --timeout=30 --tries=3 -O "$tmp" "$ICON_URL" && file "$tmp" | grep -q 'PNG image'; then
+        mv "$tmp" "$dest"
+        ok "icon: $(basename "$dest")"
+    else
+        rm -f "$tmp" 2>/dev/null || true
+        warn "icon download failed: $(basename "$dest")"
+    fi
+}
 
-mkdir -p "$HOME/.local/share/icons"
-
-# Pull Paint icon (MacOS Big Sur)[cite: 1]
-if [[ ! -f "$ICON_PATH" ]]; then
-    info "Fetching macOS Paint icon..."
-    wget -q -O "$ICON_PATH" "$URL_PAINT_ICON" || warn "Failed to fetch Paint icon"
-fi
-
-# Pull Studio icon from repo[cite: 1]
-if [[ ! -f "$ICON_STUDIO_PATH" ]]; then
-    info "Fetching standard Studio icon..."
-    wget -q -O "$ICON_STUDIO_PATH" "$URL_STUDIO_ICON" || warn "Failed to fetch Studio icon"
-fi
-# --- END UPDATED LOGIC ---
+_fetch_icon "$ICON_PAINT"
+_fetch_icon "$ICON_STUDIO"
 
 _write_launchers
 ok "launch scripts"
@@ -1256,7 +1265,7 @@ Type=Application
 Categories=Graphics;
 MimeType=application/x-clip;
 StartupWMClass=clipstudiopaint.exe
-Icon=$ICON_PATH
+Icon=$ICON_PAINT
 EOF
 
 cat > "$DESKTOP_STUDIO" << EOF
@@ -1267,7 +1276,7 @@ Terminal=false
 Type=Application
 Categories=Graphics;
 StartupWMClass=clipstudio.exe
-Icon=$ICON_STUDIO_PATH
+Icon=$ICON_STUDIO
 EOF
 
 chmod +x "$DESKTOP_FILE" "$DESKTOP_STUDIO"
@@ -1359,9 +1368,16 @@ if [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]]; then
     else
         warn "kwriteconfig not found, set window rules manually"
     fi
+    # rebuild the KDE menu database so updated .desktop entries + icons show up immediately
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        kbuildsycoca6 2>/dev/null || true
+    elif command -v kbuildsycoca5 >/dev/null 2>&1; then
+        kbuildsycoca5 2>/dev/null || true
+    fi
 fi
 
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 THUMBNAILER_SRC="$SCRIPT_DIR/patches/thumbnailer/clip-thumbnailer"
 THUMBNAILER_BIN="$HOME/.local/bin/clip-thumbnailer"
