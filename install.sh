@@ -99,6 +99,7 @@ WINE_VERSION="11.12"
 WINE_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
 FREETYPE_VERSION="2.13.2"
 FREETYPE_URL="https://archive.archlinux.org/packages/f/freetype2/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
+FREETYPE32_URL="https://archive.archlinux.org/packages/l/lib32-freetype2/lib32-freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
 WEBVIEW2_URL="https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/76eb3dc4-7851-45b7-a392-460523b0e2bb/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
 WINETRICKS_URL="https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks"
 LAUNCHER_DIR="$HOME/.local/share/cspenguin"
@@ -375,14 +376,14 @@ _install_deps_pacman() {
 }
 
 _install_deps_dnf() {
-    local pkgs=()
+    local pkgs=(freetype.i686)
     command -v wget    >/dev/null 2>&1 || pkgs+=(wget)
     command -v curl    >/dev/null 2>&1 || pkgs+=(curl)
     command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
     command -v xprop   >/dev/null 2>&1 || pkgs+=(xprop)
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
-    _gst_ok          || pkgs+=(gstreamer1-plugins-bad-free gstreamer1-plugins-good)
-    [[ ${#pkgs[@]} -gt 0 ]] && sudo dnf install -y "${pkgs[@]}"
+    _gst_ok          || pkgs+=(gstreamer1-tools gstreamer1-plugins-bad-free gstreamer1-plugins-good)
+    sudo dnf install -y "${pkgs[@]}"
 }
 
 _install_deps_apt() {
@@ -497,18 +498,32 @@ _extract_wine() {
 # ============================================================
 _bundle_freetype() {
     local _freetype_tar="$DOWNLOAD_DIR/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
+    local _freetype32_tar="$DOWNLOAD_DIR/lib32-freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
     if [[ ! -f "$_freetype_tar" ]]; then
         download_progress "FreeType ${FREETYPE_VERSION}" "$FREETYPE_URL" "$_freetype_tar"
     else
         ok "FreeType ${FREETYPE_VERSION} (cached)"
     fi
-    info "bundling FreeType ${FREETYPE_VERSION}..."
+    if [[ ! -f "$_freetype32_tar" ]]; then
+        download_progress "FreeType ${FREETYPE_VERSION} (32-bit)" "$FREETYPE32_URL" "$_freetype32_tar"
+    else
+        ok "FreeType ${FREETYPE_VERSION} 32-bit (cached)"
+    fi
+    info "bundling FreeType ${FREETYPE_VERSION} (32-bit + 64-bit)..."
     rm -rf "$FREETYPE_DIR"
-    mkdir -p "$FREETYPE_DIR"
+    mkdir -p "$FREETYPE_DIR/lib64" "$FREETYPE_DIR/lib32"
     mkdir -p /tmp/freetype-extract
     unzstd -c "$_freetype_tar" | tar -xf - -C /tmp/freetype-extract
-    cp /tmp/freetype-extract/usr/lib/libfreetype.so* "$FREETYPE_DIR/"
+    cp /tmp/freetype-extract/usr/lib/libfreetype.so* "$FREETYPE_DIR/lib64/"
+    rm -rf /tmp/freetype-extract/usr/lib
+    unzstd -c "$_freetype32_tar" | tar -xf - -C /tmp/freetype-extract
+    cp /tmp/freetype-extract/usr/lib32/libfreetype.so* "$FREETYPE_DIR/lib32/"
     rm -rf /tmp/freetype-extract
+    local _bad
+    _bad=$(ldd "$FREETYPE_DIR/lib64/libfreetype.so.6" "$FREETYPE_DIR/lib32/libfreetype.so.6" 2>/dev/null | grep -i "not found" || true)
+    if [[ -n "$_bad" ]]; then
+        die "bundled FreeType is missing dependencies: $_bad"
+    fi
     ok "FreeType ${FREETYPE_VERSION} bundled"
 }
 
@@ -518,7 +533,7 @@ _bundle_freetype() {
 _write_launchers() {
     cat > "$LAUNCH_SCRIPT" << LAUNCHEOF
 #!/usr/bin/env bash
-export LD_LIBRARY_PATH="$FREETYPE_DIR:\${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$FREETYPE_DIR/lib64:$FREETYPE_DIR/lib32:\${LD_LIBRARY_PATH:-}"
 export PATH="$WINE_DIR/bin:\$PATH"
 export WINESERVER="$WINESERVER_BIN"
 export WINEPREFIX="$WINEPREFIX"
@@ -571,7 +586,7 @@ LAUNCHEOF
 
     cat > "$LAUNCHER_STUDIO" << LAUNCHEOF
 #!/usr/bin/env bash
-export LD_LIBRARY_PATH="$FREETYPE_DIR:\${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$FREETYPE_DIR/lib64:$FREETYPE_DIR/lib32:\${LD_LIBRARY_PATH:-}"
 export PATH="$WINE_DIR/bin:\$PATH"
 export WINESERVER="$WINESERVER_BIN"
 export WINEPREFIX="$WINEPREFIX"
@@ -916,6 +931,9 @@ info "checking for required system packages..."
 _missing=()
 command -v wget >/dev/null 2>&1 || _missing+=(wget)
 command -v curl >/dev/null 2>&1 || _missing+=(curl)
+command -v unzstd >/dev/null 2>&1 || _missing+=(zstd)
+command -v wmctrl >/dev/null 2>&1 || _missing+=(wmctrl)
+command -v xprop >/dev/null 2>&1 || _missing+=(xprop)
 _gst_ok         || _missing+=("gstreamer plugins")
 
 if [[ ${#_missing[@]} -gt 0 ]]; then
