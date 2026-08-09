@@ -95,13 +95,17 @@ fi
 WINEPREFIX="${WINEPREFIX:-$HOME/.wine-csp}"
 WINEARCH=win64
 
-WINE_VERSION="11.12"
+WINE_VERSION="11.14"
 WINE_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
 FREETYPE_VERSION="2.13.2"
 FREETYPE_URL="https://archive.archlinux.org/packages/f/freetype2/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
 FREETYPE32_URL="https://archive.archlinux.org/packages/l/lib32-freetype2/lib32-freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
 WEBVIEW2_URL="https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/76eb3dc4-7851-45b7-a392-460523b0e2bb/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
 WINETRICKS_URL="https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks"
+GECKO_VERSION="2.47.4"
+GECKO_URL="https://dl.winehq.org/wine/wine-gecko/${GECKO_VERSION}/wine-gecko-${GECKO_VERSION}-x86_64.msi"
+GECKO_MSI="$DOWNLOAD_DIR/wine-gecko-${GECKO_VERSION}-x86_64.msi"
+GECKO_SHA="e590b7d988a32d6aa4cf1d8aa3aa3d33766fdd4cf4c89c2dcc2095ecb28d066f"
 LAUNCHER_DIR="$HOME/.local/share/cspenguin"
 WINE_DIR="$LAUNCHER_DIR/wine-${WINE_VERSION}"
 WINE_BIN="$WINE_DIR/bin/wine"
@@ -284,6 +288,29 @@ REGEOF
     run wine regedit /S 'C:\windows\Temp\cjk-font.reg'
     rm -f "$reg_unix"
     ok "CJK font: $font_name (was Source Han Sans, ~60s faster CSP startup)"
+}
+
+# ============================================================
+# install Wine Gecko (the MSHTML/IE engine) into the prefix
+# ============================================================
+_install_gecko() {
+    if [[ -d "$WINEPREFIX/drive_c/windows/system32/gecko/$GECKO_VERSION/wine_gecko" ]]; then
+        ok "Wine Gecko ${GECKO_VERSION} (already installed)"
+        return
+    fi
+    if [[ $DRY_RUN -eq 1 ]]; then
+        ok "Wine Gecko ${GECKO_VERSION} (dry run)"
+        return
+    fi
+    download_progress "Wine Gecko ${GECKO_VERSION}" "$GECKO_URL" "$GECKO_MSI"
+    local _sum
+    _sum=$(sha256sum "$GECKO_MSI" | cut -d' ' -f1)
+    if [[ "$_sum" != "$GECKO_SHA" ]]; then
+        die "Wine Gecko checksum mismatch (got $_sum)"
+    fi
+    wait_for "installing Wine Gecko ${GECKO_VERSION}" env WINEDEBUG=-all wine msiexec /i "$GECKO_MSI" /qn
+    [[ -d "$WINEPREFIX/drive_c/windows/system32/gecko/$GECKO_VERSION/wine_gecko" ]] \
+        || warn "Wine Gecko ${GECKO_VERSION} did not fully install"
 }
 
 wait_for() {
@@ -854,6 +881,7 @@ DXVKEOF
     ok "registry + dxvk.conf"
     install_cjk_font_fix
     _bundle_freetype
+    _install_gecko
 
     # fall through to step 6 and step 7, heh 6 7 >:D
 fi
@@ -1116,6 +1144,8 @@ else
         wait_for "${_wt_needed[*]}" env WINEDEBUG=-all "$WINETRICKS_BIN" -q "${_wt_needed[@]}"
     fi
 fi
+
+_install_gecko
 
 # compatibility settings (must be after winetricks, dotnet48 resets the version)
 if [[ $DRY_RUN -eq 0 ]]; then

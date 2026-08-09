@@ -86,12 +86,13 @@ This will migrate any old rules previous versions created and apply the current 
 3. Corefonts, vcrun2022, and dotnet48 as runtime dependencies, plus a lightweight CJK font (WenQuanYi Micro Hei) for the asset store and brushes.
 4. DXVK + VKD3D
 5. WebView2 Runtime (standalone installer)
-6. dcomp.dll + libwinpthread-1.dll, a DirectComposition shim + dependency so WebView2 panels render correctly
-7. mfplat/mfreadwrite/winegstreamer patches for timelapse/video export
-8. `.clip` file thumbnails via a native thumbnailer binary
-9. `.clip` file association so double-clicking opens CSP
-10. KDE window rules (KDE only) so ribbon bar dropdowns appear on top of CSP instead of behind it. If this doesn't apply properly you can right click your CSP icon in your taskbar or set up window rules yourself!
-11. A wineserver pre-warm service so CSP launches a bit faster
+6. Wine Gecko (the MSHTML/IE engine) installed into the prefix, so any IE-based UI renders instead of showing a blank/grey page
+7. dcomp.dll + libwinpthread-1.dll, a DirectComposition shim + dependency so WebView2 panels render correctly
+8. mfplat/mfreadwrite/winegstreamer patches for timelapse/video export
+9. `.clip` file thumbnails via a native thumbnailer binary
+10. `.clip` file association so double-clicking opens CSP
+11. KDE window rules (KDE only) so ribbon bar dropdowns appear on top of CSP instead of behind it. If this doesn't apply properly you can right click your CSP icon in your taskbar or set up window rules yourself!
+12. A wineserver pre-warm service so CSP launches a bit faster
 
 ## Running wine/winetricks manually
 
