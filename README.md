@@ -89,10 +89,12 @@ This will migrate any old rules previous versions created and apply the current 
 6. Wine Gecko (the MSHTML/IE engine) installed into the prefix, so any IE-based UI renders instead of showing a blank/grey page
 7. dcomp.dll + libwinpthread-1.dll, a DirectComposition shim + dependency so WebView2 panels render correctly
 8. mfplat/mfreadwrite/winegstreamer patches for timelapse/video export
-9. `.clip` file thumbnails via a native thumbnailer binary
+9. `.clip` file thumbnails via a native thumbnailer binary (must be enabled in your file manager — on Dolphin/KDE: _Configure Dolphin → General → Previews_ → tick "Clip Studio Paint", then restart Dolphin)
 10. `.clip` file association so double-clicking opens CSP
 11. KDE window rules (KDE only) so ribbon bar dropdowns appear on top of CSP instead of behind it. If this doesn't apply properly you can right click your CSP icon in your taskbar or set up window rules yourself!
 12. A wineserver pre-warm service so CSP launches a bit faster
+
+> **Note:** `.clip` file thumbnails need to be **enabled in your file manager's preview settings** — on Dolphin/KDE, open _Configure Dolphin → General → Previews_ and tick the "Clip Studio Paint" entry (after running the installer, restart your file manager).
 
 ## Running wine/winetricks manually
 
