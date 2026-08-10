@@ -409,6 +409,7 @@ _install_deps_pacman() {
     command -v xprop   >/dev/null 2>&1 || pkgs+=(xorg-xprop)
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
     command -v file    >/dev/null 2>&1 || pkgs+=(file)
+    command -v cabextract >/dev/null 2>&1 || pkgs+=(cabextract)
     _gst_ok          || pkgs+=(gst-plugins-bad gst-plugins-good)
     [[ ${#pkgs[@]} -gt 0 ]] && _pm_install "${pkgs[@]}"
 }
@@ -421,6 +422,7 @@ _install_deps_dnf() {
     command -v xprop   >/dev/null 2>&1 || pkgs+=(xprop)
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
     command -v file    >/dev/null 2>&1 || pkgs+=(file)
+    command -v cabextract >/dev/null 2>&1 || pkgs+=(cabextract)
     _gst_ok          || pkgs+=(gstreamer1-tools gstreamer1-plugins-bad-free gstreamer1-plugins-good)
     _pm_install "${pkgs[@]}"
 }
@@ -433,6 +435,7 @@ _install_deps_apt() {
     command -v xprop   >/dev/null 2>&1 || pkgs+=(x11-utils)
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
     command -v file    >/dev/null 2>&1 || pkgs+=(file)
+    command -v cabextract >/dev/null 2>&1 || pkgs+=(cabextract)
     _gst_ok          || pkgs+=(gstreamer1.0-plugins-bad gstreamer1.0-plugins-good)
     _pm_install "${pkgs[@]}"
 }
@@ -1096,6 +1099,7 @@ command -v unzstd >/dev/null 2>&1 || _missing+=(zstd)
 command -v wmctrl >/dev/null 2>&1 || _missing+=(wmctrl)
 command -v xprop >/dev/null 2>&1 || _missing+=(xprop)
 command -v file >/dev/null 2>&1 || _missing+=(file)
+command -v cabextract >/dev/null 2>&1 || _missing+=(cabextract)
 _gst_ok         || _missing+=("gstreamer plugins")
 
 if [[ ${#_missing[@]} -gt 0 ]]; then
