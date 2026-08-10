@@ -389,6 +389,16 @@ _detect_pm() {
     echo "unknown"
 }
 
+# single install abstraction for the detected package manager
+_pm_install() {
+    case "$(_detect_pm)" in
+        pacman) sudo pacman -S --needed --noconfirm "$@" ;;
+        dnf)    sudo dnf install -y "$@" ;;
+        apt)    sudo apt install -y "$@" ;;
+        *)      die "unsupported distro, install \"$*\" manually" ;;
+    esac
+}
+
 _gst_ok() { command -v gst-inspect-1.0 >/dev/null 2>&1 && gst-inspect-1.0 h264parse >/dev/null 2>&1; }
 
 _install_deps_pacman() {
@@ -400,7 +410,7 @@ _install_deps_pacman() {
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
     command -v file    >/dev/null 2>&1 || pkgs+=(file)
     _gst_ok          || pkgs+=(gst-plugins-bad gst-plugins-good)
-    [[ ${#pkgs[@]} -gt 0 ]] && sudo pacman -S --needed --noconfirm "${pkgs[@]}"
+    [[ ${#pkgs[@]} -gt 0 ]] && _pm_install "${pkgs[@]}"
 }
 
 _install_deps_dnf() {
@@ -412,7 +422,7 @@ _install_deps_dnf() {
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
     command -v file    >/dev/null 2>&1 || pkgs+=(file)
     _gst_ok          || pkgs+=(gstreamer1-tools gstreamer1-plugins-bad-free gstreamer1-plugins-good)
-    sudo dnf install -y "${pkgs[@]}"
+    _pm_install "${pkgs[@]}"
 }
 
 _install_deps_apt() {
@@ -424,7 +434,7 @@ _install_deps_apt() {
     command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
     command -v file    >/dev/null 2>&1 || pkgs+=(file)
     _gst_ok          || pkgs+=(gstreamer1.0-plugins-bad gstreamer1.0-plugins-good)
-    sudo apt install -y "${pkgs[@]}"
+    _pm_install "${pkgs[@]}"
 }
 
 # log file
@@ -526,6 +536,130 @@ _extract_wine() {
 # ============================================================
 # bundle FreeType into WINE_DIR
 # ============================================================
+# map a missing freetype dependency (.so name) to the distro packages that
+# provide it (native + 32-bit variant)
+_freetype_dep_pkgs() {
+    local lib="$1" pm="$2"
+    case "$pm" in
+        pacman)
+            case "$lib" in
+                libz.so*)        echo "zlib lib32-zlib" ;;
+                libbz2.so*)      echo "bzip2 lib32-bzip2" ;;
+                libpng16.so*)    echo "libpng lib32-libpng" ;;
+                libharfbuzz.so*) echo "harfbuzz lib32-harfbuzz" ;;
+                libbrotli*.so*)  echo "brotli lib32-brotli" ;;
+            esac ;;
+        dnf)
+            case "$lib" in
+                libz.so*)        echo "zlib zlib.i686" ;;
+                libbz2.so*)      echo "bzip2-libs bzip2-libs.i686" ;;
+                libpng16.so*)    echo "libpng libpng.i686" ;;
+                libharfbuzz.so*) echo "harfbuzz harfbuzz.i686" ;;
+                libbrotli*.so*)  echo "brotli brotli.i686" ;;
+            esac ;;
+        apt)
+            case "$lib" in
+                libz.so*)        echo "zlib1g zlib1g:i386" ;;
+                libbz2.so*)      echo "libbz2-1.0 libbz2-1.0:i386" ;;
+                libpng16.so*)    echo "libpng16-16 libpng16-16:i386" ;;
+                libharfbuzz.so*) echo "libharfbuzz0b libharfbuzz0b:i386" ;;
+                libbrotli*.so*)  echo "libbrotli1 libbrotli1:i386" ;;
+            esac ;;
+    esac
+}
+
+# unique list of the shared libraries the bundled FreeType cannot resolve
+_freetype_missing() {
+    ldd "$FREETYPE_DIR/lib64/libfreetype.so.6" "$FREETYPE_DIR/lib32/libfreetype.so.6" 2>/dev/null \
+        | grep "not found" \
+        | sed 's/^[[:space:]]*\([^ ]*\) => not found.*/\1/' \
+        | sort -u \
+        || true
+}
+
+# copy-pasteable fix command for the given libs
+_freetype_fix_hint() {
+    local pm="$1"; shift
+    local prefix pkgs=() lib _pair _bits
+    case "$pm" in
+        pacman) prefix="sudo pacman -S" ;;
+        dnf)    prefix="sudo dnf install" ;;
+        apt)    prefix="sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install" ;;
+        *)      return ;;
+    esac
+    for lib in "$@"; do
+        _pair=$(_freetype_dep_pkgs "$lib" "$pm")
+        [[ -n "$_pair" ]] || continue
+        read -r -a _bits <<< "$_pair"
+        [[ ${#_bits[@]} -ge 2 ]] || continue
+        pkgs+=("${_bits[1]}")
+    done
+    [[ ${#pkgs[@]} -gt 0 ]] || return
+    printf 'install the 32-bit libraries, for example:\n    %s %s\n' "$prefix" "${pkgs[*]}"
+}
+
+# some distros ship a library under a different soname than the Arch-built
+# FreeType expects (e.g. Fedora ships libbz2.so.1, FreeType wants libbz2.so.1.0).
+# if the real file exists on disk, link the expected name to it.
+_freetype_fix_symlink() {
+    local lib="$1"
+    local base="${lib%.so*}.so"
+    local real target
+    while IFS= read -r real; do
+        [[ -f "$real" ]] || continue
+        target="${real%/*}/$lib"
+        [[ -e "$target" ]] && continue
+        info "linking ${target##*/} -> $(basename "$real")"
+        sudo ln -s "$(basename "$real")" "$target" 2>/dev/null || true
+    done < <(find /usr/lib /usr/lib32 /usr/lib64 /lib /lib32 /lib64 -maxdepth 1 -name "$base.*" -type f 2>/dev/null)
+}
+
+# ensure the bundled FreeType can resolve its dependencies, installing the
+# missing 32-bit libraries when possible; dies with a fix hint if not
+_freetype_resolve() {
+    local _missing _pkgs=() _lib _pair _pm _hint
+    _missing=$(_freetype_missing)
+    [[ -n "$_missing" ]] || return 0
+    if [[ $DRY_RUN -eq 1 ]]; then
+        info "FreeType needs extra libraries (dry run, not installing): $(tr '\n' ' ' <<< "$_missing")"
+        return 0
+    fi
+    _pm="$(_detect_pm)"
+    [[ "$_pm" != "unknown" ]] || die "bundled FreeType is missing dependencies: $(tr '\n' ' ' <<< "$_missing")
+install the missing 32-bit libraries for your distribution, then re-run the installer"
+    while IFS= read -r _lib; do
+        read -r -a _pair <<< "$(_freetype_dep_pkgs "$_lib" "$_pm")"
+        _pkgs+=("${_pair[@]}")
+    done <<< "$_missing"
+    if [[ ${#_pkgs[@]} -gt 0 ]]; then
+        info "installing FreeType dependencies: ${_pkgs[*]}"
+        if [[ "$_pm" == "apt" ]]; then
+            sudo dpkg --add-architecture i386 2>/dev/null || true
+            sudo apt update 2>/dev/null || true
+        fi
+        _pm_install "${_pkgs[@]}" || true
+    fi
+    _missing=$(_freetype_missing)
+    if [[ -n "$_missing" ]]; then
+        while IFS= read -r _lib; do
+            _freetype_fix_symlink "$_lib"
+        done <<< "$_missing"
+        _missing=$(_freetype_missing)
+    fi
+    if [[ -n "$_missing" ]]; then
+        _hint=$(_freetype_fix_hint "$_pm" $_missing)
+        if [[ -n "$_hint" ]]; then
+            die "bundled FreeType is still missing dependencies: $(tr '\n' ' ' <<< "$_missing")
+
+$_hint
+then re-run the installer"
+        else
+            die "bundled FreeType is still missing dependencies: $(tr '\n' ' ' <<< "$_missing")
+install the missing 32-bit libraries for your distribution, then re-run the installer"
+        fi
+    fi
+}
+
 _bundle_freetype() {
     local _freetype_tar="$DOWNLOAD_DIR/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
     local _freetype32_tar="$DOWNLOAD_DIR/lib32-freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
@@ -549,11 +683,7 @@ _bundle_freetype() {
     unzstd -c "$_freetype32_tar" | tar -xf - -C /tmp/freetype-extract
     cp /tmp/freetype-extract/usr/lib32/libfreetype.so* "$FREETYPE_DIR/lib32/"
     rm -rf /tmp/freetype-extract
-    local _bad
-    _bad=$(ldd "$FREETYPE_DIR/lib64/libfreetype.so.6" "$FREETYPE_DIR/lib32/libfreetype.so.6" 2>/dev/null | grep -i "not found" || true)
-    if [[ -n "$_bad" ]]; then
-        die "bundled FreeType is missing dependencies: $_bad"
-    fi
+    _freetype_resolve
     ok "FreeType ${FREETYPE_VERSION} bundled"
 }
 
