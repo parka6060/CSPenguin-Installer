@@ -1211,6 +1211,15 @@ if [[ $DRY_RUN -eq 0 ]]; then
     export PATH="$WINE_DIR/bin:$PATH"
 fi
 
+# For debugging when using a VM, avoids error during testing
+if [[ -z "${LIBGL_ALWAYS_SOFTWARE:-}" ]] \
+    && command -v systemd-detect-virt >/dev/null 2>&1 \
+    && [[ "$(systemd-detect-virt 2>/dev/null)" != "none" ]]; then
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+    ok "Mesa software rendering (VM without working DRI3)"
+fi
+
 # [3/7] wine prefix
 
 step "wine prefix"
