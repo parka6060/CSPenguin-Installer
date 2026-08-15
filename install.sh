@@ -95,7 +95,7 @@ fi
 WINEPREFIX="${WINEPREFIX:-$HOME/.wine-csp}"
 WINEARCH=win64
 
-WINE_VERSION="11.14"
+WINE_VERSION="11.15"
 WINE_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
 FREETYPE_VERSION="2.13.2"
 FREETYPE_URL="https://archive.archlinux.org/packages/f/freetype2/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
@@ -122,11 +122,15 @@ LOG_FILE="${DOWNLOAD_DIR}/csp-install.log"
 # helpers
 run() {
     [[ $DRY_RUN -eq 1 ]] && return 0
+    local _rc
     if [[ $VERBOSE -eq 1 ]]; then
         "$@" 2>&1 | tee -a "$LOG_FILE"
+        _rc=${PIPESTATUS[0]}
     else
         "$@" >> "$LOG_FILE" 2>&1
+        _rc=$?
     fi
+    return "$_rc"
 }
 
 GH_RAW="https://raw.githubusercontent.com/parka6060/CSPenguin-Installer/main"
@@ -283,10 +287,21 @@ REGEDIT4
 "ClientSideAntiAliasWithCore"="Y"
 "ClientSideAntiAliasWithRender"="Y"
 "ClientSideWithRender"="Y"
+
+[HKEY_CURRENT_USER\Software\Wine\Fonts]
+"Cache"="600"
 REGEOF
 
     run wine regedit /S 'C:\windows\Temp\cjk-font.reg'
     rm -f "$reg_unix"
+
+    # Wine caches EnumFontFamiliesEx results; warming the cache here avoids
+    # repeated expensive font scans when loading brush/material thumbnails.
+    if command -v fc-cache &>/dev/null; then
+        info "pre-generating font cache..."
+        fc-cache -f "$fonts_dir" >> "$LOG_FILE" 2>&1 || true
+    fi
+
     ok "CJK font: $font_name (was Source Han Sans, ~60s faster CSP startup)"
 }
 
@@ -703,6 +718,9 @@ export WINEPREFIX="$WINEPREFIX"
 export WINEDEBUG=-all
 export WINEESYNC=1
 export WINEFSYNC=1
+export STAGING_SHARED_MEMORY=1
+export STAGING_WRITECOPY=1
+export WINE_NO_WRITE_CONSOLE=1
 export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
 export DXVK_ASYNC=1
 export DXVK_STATE_CACHE=1
@@ -712,8 +730,20 @@ export mesa_glthread=true
 export __GL_SHADER_DISK_CACHE=1
 export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
 export RADV_PERFTEST=gpl
-export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-background-networking --no-first-run --disable-sync"
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-background-networking --no-first-run --disable-sync --disable-renderer-accessibility --disable-extensions --disable-component-extensions-with-background-pages --disk-cache-size=33554432 --disable-features=msEdgeSidebar"
 CSP_EXE="$CSP_INSTALL_PATH"
+
+# Pre-load material database into page cache to help speed up loading of materials.
+# CSP stores materials as SQLite files under Documents/CELSYS/ (older versions), and AppData.
+_CSP_USER="$WINEPREFIX/drive_c/users/\$(whoami)"
+for _MATS_DIR in "\$_CSP_USER/Documents/CELSYS" "\$_CSP_USER/AppData/Roaming/CELSYS" "\$_CSP_USER/AppData/Local/CELSYS"; do
+    [[ -d "\$_MATS_DIR" ]] || continue
+    find "\$_MATS_DIR" -name "*.sqlite" -o -name "*.db" 2>/dev/null | while read -r _f; do
+        cat "\$_f" > /dev/null 2>&1 &
+    done
+done
+wait
+
 if [[ -n "\$1" ]] && command -v winepath &>/dev/null; then
     WIN_PATH="\$(WINEPREFIX="$WINEPREFIX" winepath --windows "\$1")"
     wine "\$CSP_EXE" "\$WIN_PATH" &
@@ -756,6 +786,9 @@ export WINEPREFIX="$WINEPREFIX"
 export WINEDEBUG=-all
 export WINEESYNC=1
 export WINEFSYNC=1
+export STAGING_SHARED_MEMORY=1
+export STAGING_WRITECOPY=1
+export WINE_NO_WRITE_CONSOLE=1
 export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
 export DXVK_ASYNC=1
 export DXVK_STATE_CACHE=1
@@ -765,7 +798,7 @@ export mesa_glthread=true
 export __GL_SHADER_DISK_CACHE=1
 export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
 export RADV_PERFTEST=gpl
-export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu"
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-renderer-accessibility --disable-extensions --disable-component-extensions-with-background-pages --disk-cache-size=33554432 --disable-features=msEdgeSidebar"
 exec wine "$STUDIO_EXE"
 LAUNCHEOF
     chmod +x "$LAUNCHER_STUDIO"
@@ -816,8 +849,21 @@ _install_patches() {
     fi
 
     if [[ $_ok -eq 1 ]]; then
-        run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfplat" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfplat override"
-        run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfreadwrite" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfreadwrite override"
+        if ! run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfplat" /t REG_SZ /d "native,builtin" /f ||
+           ! run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfreadwrite" /t REG_SZ /d "native,builtin" /f; then
+            # wine reg add can potentially fail during a Wine version upgrade (prefix migration,
+            # new wineserver not ready).  Fall back to writing a .reg file directly.
+            local _reg_tmp="$WINEPREFIX/drive_c/windows/Temp/mf-overrides.reg"
+            cat > "$_reg_tmp" << 'REGEOF'
+REGEDIT4
+
+[HKEY_CURRENT_USER\Software\Wine\DllOverrides]
+"mfplat"="native,builtin"
+"mfreadwrite"="native,builtin"
+REGEOF
+            run wine regedit /S 'C:\windows\Temp\mf-overrides.reg' || warn "failed to set mfplat/mfreadwrite overrides"
+            rm -f "$_reg_tmp"
+        fi
         ok "patches applied: video export"
     else
         warn "patches not available for Wine ${WINE_VERSION}, video export or rotated/circular text may not work"
@@ -1010,6 +1056,7 @@ if [[ $UPDATE_ONLY -eq 1 ]]; then
 dxgi.deferSurfaceCreation = True
 dxvk.enableGraphicsPipelineLibrary = True
 dxvk.numCompilerThreads = 0
+dxvk.maxChunkSize = 16
 DXVKEOF
     ok "registry + dxvk.conf"
     install_cjk_font_fix
@@ -1108,7 +1155,7 @@ if [[ ${#_missing[@]} -gt 0 ]]; then
     if [[ "$_pm" == "unknown" ]]; then
         die "unsupported distro, install wget, curl, and gstreamer plugins manually"
     fi
-    printf "  ${TEAL}│${RESET} "
+    printf "  ${TEAL}│${RESET} " || true
     read -rp "  install automatically? [Y/n]: " _ans </dev/tty
     if [[ "${_ans:-y}" =~ ^[Yy]$ ]]; then
         if [[ $DRY_RUN -eq 1 ]]; then
@@ -1304,6 +1351,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 dxgi.deferSurfaceCreation = True
 dxvk.enableGraphicsPipelineLibrary = True
 dxvk.numCompilerThreads = 0
+dxvk.maxChunkSize = 16
 EOF
 fi
 ok "windows version: win10"
@@ -1342,7 +1390,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
     msg "${BOLD}press enter to launch the CSP installer.${RESET}"
     msg "${DIM}complete the installer as normal.${RESET}"
     gap
-    printf "  ${TEAL}│${RESET}   "
+    printf "  ${TEAL}│${RESET}   " || true
     read -rp "press enter to continue..." </dev/tty
     ok "Clip Studio Paint (dry run)"
 else
@@ -1359,7 +1407,7 @@ else
     msg "${BOLD}press enter to launch the CSP installer.${RESET}"
     msg "${DIM}complete the installer as normal.${RESET}"
     gap
-    printf "  ${TEAL}│${RESET}   "
+    printf "  ${TEAL}│${RESET}   " || true
     read -rp "press enter to continue..." </dev/tty
     info "CSP installer running, come back when done..."
     env WINEDEBUG=-all WINEDLLOVERRIDES="winemenubuilder.exe=d" \
@@ -1611,7 +1659,7 @@ if [[ $UPDATE_ONLY -eq 1 ]] && systemctl --user is-enabled csp-wineserver.servic
     _prewarm="y"
     info "updating existing wineserver service"
 else
-    printf "  ${TEAL}│${RESET}   "
+    printf "  ${TEAL}│${RESET}   " || true
     read -rp "enable wineserver pre-warm? [Y/n] " _prewarm </dev/tty
 fi
 if [[ "${_prewarm,,}" != "n" ]]; then
@@ -1631,6 +1679,7 @@ Environment=WINEPREFIX=$WINEPREFIX
 Environment=WINESERVER=$WINESERVER_BIN
 Environment=WINEDEBUG=-all
 ExecStartPre=-$WINESERVER_BIN -k
+ExecStartPre=-/usr/bin/bash -c 'for d in "$WINEPREFIX/drive_c/users/$(whoami)/Documents/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Roaming/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Local/CELSYS"; do [ -d "$d" ] && find "$d" -name "*.sqlite" -o -name "*.db" | while read f; do cat "$f" > /dev/null 2>&1 & done; done; wait'
 ExecStart=$WINESERVER_BIN -f -p
 Restart=always
 RestartSec=5s
