@@ -62,7 +62,6 @@ struct FakeCompositionSwapChain;
 
 static ID3D11Device    *g_d3dDev  = nullptr;
 static IDXGIFactory2   *g_factory = nullptr;
-static volatile LONG    g_visualDirty = 0;  /* bumped on any visual-tree mutation */
 
 /* FakeCompositionSwapChain : IDXGISwapChain1 , backs CreateSwapChainForComposition, no HWND, just a texture */
 struct FakeCompositionSwapChain final : IDXGISwapChain1
@@ -71,7 +70,6 @@ struct FakeCompositionSwapChain final : IDXGISwapChain1
     ID3D11Device        *dev;
     ID3D11Texture2D     *tex    = nullptr;
     DXGI_SWAP_CHAIN_DESC1 desc1 = {};
-    volatile LONG        dirty  = 1;   /* start dirty so first frame blits */
     FakeCompositionSwapChain(ID3D11Device *d, const DXGI_SWAP_CHAIN_DESC1 *pd)
         : dev(d) { dev->AddRef(); desc1 = *pd; create_tex(); }
 
@@ -121,7 +119,7 @@ struct FakeCompositionSwapChain final : IDXGISwapChain1
     { return dev->QueryInterface(riid, ppv); }
 
     /* IDXGISwapChain */
-    HRESULT STDMETHODCALLTYPE Present(UINT,UINT) override { InterlockedExchange(&dirty, 1); return S_OK; }
+    HRESULT STDMETHODCALLTYPE Present(UINT,UINT) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE GetBuffer(UINT buf, REFIID riid, void **ppSurface) override
     {
         if (!tex || buf != 0) { *ppSurface = nullptr; return DXGI_ERROR_INVALID_CALL; }
@@ -149,7 +147,7 @@ struct FakeCompositionSwapChain final : IDXGISwapChain1
         if (w) desc1.Width  = w;
         if (h) desc1.Height = h;
         if (f != DXGI_FORMAT_UNKNOWN) desc1.Format = f;
-        create_tex(); InterlockedExchange(&dirty, 1); return S_OK;
+        create_tex(); return S_OK;
     }
     HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC*)     override { return S_OK; }
     HRESULT STDMETHODCALLTYPE GetContainingOutput(IDXGIOutput**ppOut) override { *ppOut=nullptr; return E_FAIL; }
@@ -165,7 +163,7 @@ struct FakeCompositionSwapChain final : IDXGISwapChain1
     HRESULT STDMETHODCALLTYPE GetHwnd(HWND *ph) override { if(ph)*ph=nullptr; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetCoreWindow(REFIID,void**ppv) override { *ppv=nullptr; return E_FAIL; }
     HRESULT STDMETHODCALLTYPE Present1(UINT si,UINT f,const DXGI_PRESENT_PARAMETERS*) override
-    { InterlockedExchange(&dirty, 1); return Present(si,f); }
+    { return Present(si,f); }
     BOOL STDMETHODCALLTYPE IsTemporaryMonoSupported() override { return FALSE; }
     HRESULT STDMETHODCALLTYPE GetRestrictToOutput(IDXGIOutput**ppOut) override { *ppOut=nullptr; return E_FAIL; }
     HRESULT STDMETHODCALLTYPE SetBackgroundColor(const DXGI_RGBA*) override { return S_OK; }
@@ -339,7 +337,6 @@ struct FakeVisual final : IDCompositionVisual2
         if (content) content->Release();
         content = c;
         if (c) c->AddRef();
-        InterlockedIncrement(&g_visualDirty);
         return S_OK;
     }
 
@@ -351,20 +348,18 @@ struct FakeVisual final : IDCompositionVisual2
         fv->AddRef();
         if (above) children.push_back(fv);
         else       children.insert(children.begin(), fv);
-        InterlockedIncrement(&g_visualDirty);
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE RemoveVisual(IDCompositionVisual *child) override
     {
         for (auto it = children.begin(); it != children.end(); ++it)
-            if (*it == child) { (*it)->Release(); children.erase(it); InterlockedIncrement(&g_visualDirty); break; }
+            if (*it == child) { (*it)->Release(); children.erase(it); break; }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE RemoveAllVisuals() override
     {
         for (auto *c : children) c->Release();
         children.clear();
-        InterlockedIncrement(&g_visualDirty);
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE SetCompositeMode(DCOMPOSITION_COMPOSITE_MODE) override { return S_OK; }
@@ -386,7 +381,6 @@ struct FakeTarget final : IDCompositionTarget
     ID3D11Texture2D   *stagingTex = nullptr;
     UINT               stagingW  = 0, stagingH = 0;
     BYTE              *gdiBuf    = nullptr;   /* contiguous BGRA row buffer */
-    LONG               lastVisualDirty = 0;   /* snapshot of g_visualDirty at last blit */
 
     FakeTarget(HWND h)
         : hwnd(h), exstyle(h ? GetWindowLong(h, GWL_EXSTYLE) : 0)
@@ -534,21 +528,12 @@ struct FakeTarget final : IDCompositionTarget
             {
                 IDXGISwapChain1 *sc = nullptr;
                 if (SUCCEEDED(c->QueryInterface(MY_IID_IDXGISwapChain1, (void **)&sc))) {
-                    /* Check dirty flag before doing the expensive blit */
-                    auto *fsc = static_cast<FakeCompositionSwapChain *>(sc);
-                    if (InterlockedCompareExchange(&fsc->dirty, 0, 1)) {
-                        ID3D11Texture2D *buf = nullptr;
-                        bool ok = false;
-                        if (SUCCEEDED(sc->GetBuffer(0, MY_IID_ID3D11Texture2D, (void**)&buf)))
-                        { ok = commit_texture(buf); buf->Release(); }
-                        if (!ok) fsc->dirty = 1;  /* restore if blit failed */
-                        sc->Release();
-                        if (ok) return true;
-                    } else {
-                        sc->Release();
-                        /* swap chain not dirty — still "found" content, skip blit */
-                        return true;
-                    }
+                    ID3D11Texture2D *buf = nullptr;
+                    bool ok = false;
+                    if (SUCCEEDED(sc->GetBuffer(0, MY_IID_ID3D11Texture2D, (void**)&buf)))
+                    { ok = commit_texture(buf); buf->Release(); }
+                    sc->Release();
+                    if (ok) return true;
                 }
             }
 
@@ -687,8 +672,6 @@ struct FakeDevice final : IDCompositionDesktopDevice
             LOG("process: %s -> isPaint=%d", exe, isPaint);
         }
 
-        LONG curVisualDirty = InterlockedCompareExchange(&g_visualDirty, 0, 0);
-
         /* In Paint: only commit targets in a popup/dialog subtree
            (window or ancestor has WS_EX_NOREDIRECTIONBITMAP).
            Canvas backdrop targets have no such ancestor, so skipping them
@@ -697,11 +680,6 @@ struct FakeDevice final : IDCompositionDesktopDevice
            In Studio: commit all targets. */
         for (auto *t : targets) {
             if (isPaint && !t->inPopupTree) continue;
-            /* Skip tree walk entirely if neither the visual tree nor any
-               swap-chain content changed since the last commit. */
-            bool visualChanged = (curVisualDirty != t->lastVisualDirty);
-            t->lastVisualDirty = curVisualDirty;
-            if (!visualChanged) continue;
             t->commit_visual(t->root);
         }
         return S_OK;

@@ -661,6 +661,7 @@ install the missing 32-bit libraries for your distribution, then re-run the inst
 _bundle_freetype() {
     local _freetype_tar="$DOWNLOAD_DIR/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
     local _freetype32_tar="$DOWNLOAD_DIR/lib32-freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
+    local _extract_dir
     if [[ ! -f "$_freetype_tar" ]]; then
         download_progress "FreeType ${FREETYPE_VERSION}" "$FREETYPE_URL" "$_freetype_tar"
     else
@@ -674,13 +675,15 @@ _bundle_freetype() {
     info "bundling FreeType ${FREETYPE_VERSION} (32-bit + 64-bit)..."
     rm -rf "$FREETYPE_DIR"
     mkdir -p "$FREETYPE_DIR/lib64" "$FREETYPE_DIR/lib32"
-    mkdir -p /tmp/freetype-extract
-    unzstd -c "$_freetype_tar" | tar -xf - -C /tmp/freetype-extract
-    cp /tmp/freetype-extract/usr/lib/libfreetype.so* "$FREETYPE_DIR/lib64/"
-    rm -rf /tmp/freetype-extract/usr/lib
-    unzstd -c "$_freetype32_tar" | tar -xf - -C /tmp/freetype-extract
-    cp /tmp/freetype-extract/usr/lib32/libfreetype.so* "$FREETYPE_DIR/lib32/"
-    rm -rf /tmp/freetype-extract
+    _extract_dir=$(mktemp -d "${TMPDIR:-/tmp}/csp-freetype.XXXXXX")
+    (
+        trap 'rm -rf -- "$_extract_dir"' EXIT
+        unzstd -c "$_freetype_tar" | tar -xf - -C "$_extract_dir"
+        cp "$_extract_dir"/usr/lib/libfreetype.so* "$FREETYPE_DIR/lib64/"
+        rm -rf "$_extract_dir/usr/lib"
+        unzstd -c "$_freetype32_tar" | tar -xf - -C "$_extract_dir"
+        cp "$_extract_dir"/usr/lib32/libfreetype.so* "$FREETYPE_DIR/lib32/"
+    )
     _freetype_resolve
     ok "FreeType ${FREETYPE_VERSION} bundled"
 }
@@ -784,11 +787,38 @@ LAUNCHEOF
     chmod +x "$LAUNCHER_STUDIO"
 }
 
+_write_prewarm_service() {
+    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$HOME/.config/systemd/user/csp-wineserver.service" << EOF
+[Unit]
+Description=Wine server pre-warm for CSP
+After=default.target
+
+[Service]
+Type=simple
+Environment=PATH=$WINE_DIR/bin:/usr/bin
+Environment=WINEPREFIX=$WINEPREFIX
+Environment=WINESERVER=$WINESERVER_BIN
+Environment=WINEDEBUG=-all
+ExecStartPre=-$WINESERVER_BIN -k
+ExecStartPre=-/usr/bin/bash -c 'for d in "$WINEPREFIX/drive_c/users/$(whoami)/Documents/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Roaming/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Local/CELSYS"; do [ -d "$d" ] && find "$d" -name "*.sqlite" -o -name "*.db" | while read f; do cat "$f" > /dev/null 2>&1 & done; done; wait'
+ExecStart=$WINESERVER_BIN -f -p
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
 _install_patches() {
     local _patches_win="$SCRIPT_DIR/patches/x86_64-windows-wine${WINE_VERSION}"
     local _patches_unix="$SCRIPT_DIR/patches/x86_64-unix-wine${WINE_VERSION}"
 
-    if [[ ! -d "$_patches_win" ]] || [[ ! -f "$_patches_win/mfplat.dll" ]]; then
+    if [[ ! -f "$_patches_win/mfplat.dll" ]] ||
+       [[ ! -f "$_patches_win/mfreadwrite.dll" ]] ||
+       [[ ! -f "$_patches_win/winegstreamer.dll" ]] ||
+       [[ ! -f "$_patches_unix/winegstreamer.so" ]]; then
         # try to fetch the exact version from remote
         local _fallback="$DOWNLOAD_DIR/patches/x86_64-windows-wine${WINE_VERSION}"
         if _try_fetch_patch "$_fallback" "patches/x86_64-windows-wine${WINE_VERSION}" "mfplat.dll" &&
@@ -853,7 +883,7 @@ if [[ $UPDATE_ONLY -eq 0 ]] && [[ $UPDATE_WINE -eq 0 ]] && [[ -f "$LAUNCH_SCRIPT
     echo ""
     echo "    1) update       - regenerate launch scripts/config only; keeps your CSP install and Wine version as-is (fast)"
     echo "    2) update wine  - install or repair the supported bundled Wine runtime"
-    echo "    3) reinstall    - wipe and do a full fresh install"
+    echo "    3) reinstall    - run the full installer again"
     echo "    4) cancel"
     echo ""
     _choice=""
@@ -917,7 +947,7 @@ if [[ $UPDATE_WINE -eq 1 ]]; then
         echo -e "  ${YELLOW}${BOLD}already at supported Wine $WINE_VERSION${RESET} ${DIM}-- nothing to update${RESET}"
         echo ""
         echo "    1) update    - regenerate launch scripts/config anyway"
-        echo "    2) reinstall - wipe and do a full fresh install"
+        echo "    2) reinstall - run the full installer again"
         echo "    3) cancel"
         echo ""
         _choice=""
@@ -952,6 +982,19 @@ if [[ $UPDATE_WINE -eq 1 ]]; then
 
         _extract_wine "$_wine_tar"
         _bundle_freetype
+
+        # Keep an existing opt-in pre-warm service pointed at the new runtime.
+        _prewarm_service="$HOME/.config/systemd/user/csp-wineserver.service"
+        if [[ -f "$_prewarm_service" ]]; then
+            _prewarm_enabled=0
+            systemctl --user is-enabled csp-wineserver.service &>/dev/null && _prewarm_enabled=1
+            _write_prewarm_service
+            systemctl --user daemon-reload 2>/dev/null || warn "could not reload wineserver service"
+            if [[ $_prewarm_enabled -eq 1 ]]; then
+                systemctl --user restart csp-wineserver.service 2>/dev/null \
+                    || warn "could not restart wineserver service"
+            fi
+        fi
 
         # clean up old Wine version
         _old_wine_dir="$LAUNCHER_DIR/wine-${_current_wine}"
@@ -1510,10 +1553,12 @@ if [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]]; then
         }
 
         _register_kwin_rule() {
-            local uuid="$1" rules
+            local uuid="$1" rules count
             rules=$($_krc --file kwinrulesrc --group General --key rules 2>/dev/null || true)
+            count=$($_krc --file kwinrulesrc --group General --key count 2>/dev/null || echo 0)
             if [[ "$rules" != *"$uuid"* ]]; then
                 local new_rules="${rules:+$rules,}$uuid"
+                $_kwc --file kwinrulesrc --group General --key count "$((count + 1))"
                 $_kwc --file kwinrulesrc --group General --key rules "$new_rules"
             fi
         }
@@ -1641,27 +1686,7 @@ if [[ "${_prewarm,,}" != "n" ]]; then
     if [[ $DRY_RUN -eq 1 ]]; then
         ok "wineserver service (dry run)"
     else
-        mkdir -p "$HOME/.config/systemd/user"
-        cat > "$HOME/.config/systemd/user/csp-wineserver.service" << EOF
-[Unit]
-Description=Wine server pre-warm for CSP
-After=default.target
-
-[Service]
-Type=simple
-Environment=PATH=$WINE_DIR/bin:/usr/bin
-Environment=WINEPREFIX=$WINEPREFIX
-Environment=WINESERVER=$WINESERVER_BIN
-Environment=WINEDEBUG=-all
-ExecStartPre=-$WINESERVER_BIN -k
-ExecStartPre=-/usr/bin/bash -c 'for d in "$WINEPREFIX/drive_c/users/$(whoami)/Documents/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Roaming/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Local/CELSYS"; do [ -d "$d" ] && find "$d" -name "*.sqlite" -o -name "*.db" | while read f; do cat "$f" > /dev/null 2>&1 & done; done; wait'
-ExecStart=$WINESERVER_BIN -f -p
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=default.target
-EOF
+        _write_prewarm_service
         if systemctl --user daemon-reload 2>/dev/null && systemctl --user enable --now csp-wineserver.service 2>/dev/null; then
             ok "wineserver service enabled"
         else
