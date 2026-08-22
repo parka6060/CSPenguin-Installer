@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 VERBOSE=0
 SKIP_WINETRICKS=0
 DRY_RUN=0
+UPDATE_WINE=0
 UPDATE_ONLY=0
 _ESYNC_RESTART=0
 for arg in "$@"; do
     [[ "$arg" == "--verbose"         || "$arg" == "-v" ]] && VERBOSE=1
     [[ "$arg" == "--skip-winetricks" || "$arg" == "-s" ]] && SKIP_WINETRICKS=1
     [[ "$arg" == "--dry-run"         || "$arg" == "-n" ]] && DRY_RUN=1
+    [[ "$arg" == "--update-wine"     || "$arg" == "-w" ]] && UPDATE_WINE=1
     [[ "$arg" == "--update"          || "$arg" == "-u" ]] && UPDATE_ONLY=1
 done
 
@@ -37,24 +39,40 @@ _setup_colors
 TOTAL_STEPS=7
 STEP=0
 
+# _log writes a plain-text (no ANSI codes) trail of what happened to
+# LOG_FILE, independent of what run() captures from external commands.
+_log() { [[ -n "${LOG_FILE:-}" ]] && echo "$1" >> "$LOG_FILE" 2>/dev/null; }
+
 step() {
     STEP=$((STEP + 1))
     echo ""
     echo -e "  ${TEAL}│${RESET} ${TEAL}${BOLD}[${STEP}/${TOTAL_STEPS}] $1${RESET}"
+    _log "[STEP ${STEP}/${TOTAL_STEPS}] $1"
 }
 
-ok()   { echo -e "  ${TEAL}│${RESET} ${AMBER}+${RESET} $1"; }
-warn() { echo -e "  ${TEAL}│${RESET} ${YELLOW}!${RESET} ${YELLOW}$1${RESET}"; }
-info() { echo -e "  ${TEAL}│${RESET} ${DIM}- $1${RESET}"; }
+ok()   { echo -e "  ${TEAL}│${RESET} ${AMBER}+${RESET} $1"; _log "OK: $1"; }
+warn() { echo -e "  ${TEAL}│${RESET} ${YELLOW}!${RESET} ${YELLOW}$1${RESET}"; _log "WARN: $1"; }
+info() { echo -e "  ${TEAL}│${RESET} ${DIM}- $1${RESET}"; _log "INFO: $1"; }
 gap()  { echo -e "  ${TEAL}│${RESET}"; }
-msg()  { echo -e "  ${TEAL}│${RESET} $1"; }
+msg()  { echo -e "  ${TEAL}│${RESET} $1"; _log "$1"; }
 
 die() {
     echo ""
     echo -e "  ${RED}✗ ERROR:${RESET} $1"
     [[ -n "${LOG_FILE:-}" ]] && echo -e "  ${DIM}log: $LOG_FILE${RESET}"
     echo -e "  ${DIM}https://github.com/parka6060/CSPenguin-Installer/issues${RESET}"
+    _log "ERROR: $1"
     exit 1
+}
+
+# catch and log command failures
+_on_error() {
+    local _exit=$? _line="$1" _cmd="$2"
+    _log "UNEXPECTED ERROR at line ${_line} (exit ${_exit}): ${_cmd}"
+    echo ""
+    echo -e "  ${RED}✗ ERROR:${RESET} unexpected failure at line ${_line}: ${_cmd} (exit ${_exit})"
+    [[ -n "${LOG_FILE:-}" ]] && echo -e "  ${DIM}log: $LOG_FILE${RESET}"
+    echo -e "  ${DIM}https://github.com/parka6060/CSPenguin-Installer/issues${RESET}"
 }
 
 # cleanup
@@ -79,12 +97,20 @@ WINEARCH=win64
 
 WINE_VERSION="11.4"
 WINE_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
+FREETYPE_VERSION="2.13.2"
+FREETYPE_URL="https://archive.archlinux.org/packages/f/freetype2/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
+FREETYPE32_URL="https://archive.archlinux.org/packages/l/lib32-freetype2/lib32-freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
 WEBVIEW2_URL="https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/76eb3dc4-7851-45b7-a392-460523b0e2bb/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
 WINETRICKS_URL="https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks"
+GECKO_VERSION="2.47.4"
+GECKO_URL="https://dl.winehq.org/wine/wine-gecko/${GECKO_VERSION}/wine-gecko-${GECKO_VERSION}-x86_64.msi"
+GECKO_MSI="$DOWNLOAD_DIR/wine-gecko-${GECKO_VERSION}-x86_64.msi"
+GECKO_SHA="e590b7d988a32d6aa4cf1d8aa3aa3d33766fdd4cf4c89c2dcc2095ecb28d066f"
 LAUNCHER_DIR="$HOME/.local/share/cspenguin"
 WINE_DIR="$LAUNCHER_DIR/wine-${WINE_VERSION}"
 WINE_BIN="$WINE_DIR/bin/wine"
 WINESERVER_BIN="$WINE_DIR/bin/wineserver"
+FREETYPE_DIR="$WINE_DIR/lib/freetype2-${FREETYPE_VERSION}"
 WINETRICKS_BIN="$LAUNCHER_DIR/winetricks"
 LAUNCH_SCRIPT="$LAUNCHER_DIR/csp-launch.sh"
 LAUNCHER_STUDIO="$LAUNCHER_DIR/clipstudio-launch.sh"
@@ -96,11 +122,15 @@ LOG_FILE="${DOWNLOAD_DIR}/csp-install.log"
 # helpers
 run() {
     [[ $DRY_RUN -eq 1 ]] && return 0
+    local _rc
     if [[ $VERBOSE -eq 1 ]]; then
         "$@" 2>&1 | tee -a "$LOG_FILE"
+        _rc=${PIPESTATUS[0]}
     else
         "$@" >> "$LOG_FILE" 2>&1
+        _rc=$?
     fi
+    return "$_rc"
 }
 
 GH_RAW="https://raw.githubusercontent.com/parka6060/CSPenguin-Installer/main"
@@ -257,11 +287,45 @@ REGEDIT4
 "ClientSideAntiAliasWithCore"="Y"
 "ClientSideAntiAliasWithRender"="Y"
 "ClientSideWithRender"="Y"
+
+[HKEY_CURRENT_USER\Software\Wine\Fonts]
+"Cache"="600"
 REGEOF
 
     run wine regedit /S 'C:\windows\Temp\cjk-font.reg'
     rm -f "$reg_unix"
+
+    # Wine caches EnumFontFamiliesEx results; warming the cache here avoids
+    # repeated expensive font scans when loading brush/material thumbnails.
+    if command -v fc-cache &>/dev/null; then
+        info "pre-generating font cache..."
+        fc-cache -f "$fonts_dir" >> "$LOG_FILE" 2>&1 || true
+    fi
+
     ok "CJK font: $font_name (was Source Han Sans, ~60s faster CSP startup)"
+}
+
+# ============================================================
+# install Wine Gecko (the MSHTML/IE engine) into the prefix
+# ============================================================
+_install_gecko() {
+    if [[ -d "$WINEPREFIX/drive_c/windows/system32/gecko/$GECKO_VERSION/wine_gecko" ]]; then
+        ok "Wine Gecko ${GECKO_VERSION} (already installed)"
+        return
+    fi
+    if [[ $DRY_RUN -eq 1 ]]; then
+        ok "Wine Gecko ${GECKO_VERSION} (dry run)"
+        return
+    fi
+    download_progress "Wine Gecko ${GECKO_VERSION}" "$GECKO_URL" "$GECKO_MSI"
+    local _sum
+    _sum=$(sha256sum "$GECKO_MSI" | cut -d' ' -f1)
+    if [[ "$_sum" != "$GECKO_SHA" ]]; then
+        die "Wine Gecko checksum mismatch (got $_sum)"
+    fi
+    wait_for "installing Wine Gecko ${GECKO_VERSION}" env WINEDEBUG=-all wine msiexec /i "$GECKO_MSI" /qn
+    [[ -d "$WINEPREFIX/drive_c/windows/system32/gecko/$GECKO_VERSION/wine_gecko" ]] \
+        || warn "Wine Gecko ${GECKO_VERSION} did not fully install"
 }
 
 wait_for() {
@@ -340,36 +404,55 @@ _detect_pm() {
     echo "unknown"
 }
 
+# single install abstraction for the detected package manager
+_pm_install() {
+    case "$(_detect_pm)" in
+        pacman) sudo pacman -S --needed --noconfirm "$@" ;;
+        dnf)    sudo dnf install -y "$@" ;;
+        apt)    sudo apt install -y "$@" ;;
+        *)      die "unsupported distro, install \"$*\" manually" ;;
+    esac
+}
+
 _gst_ok() { command -v gst-inspect-1.0 >/dev/null 2>&1 && gst-inspect-1.0 h264parse >/dev/null 2>&1; }
 
 _install_deps_pacman() {
     local pkgs=()
-    command -v wget   >/dev/null 2>&1 || pkgs+=(wget)
-    command -v curl   >/dev/null 2>&1 || pkgs+=(curl)
-    command -v wmctrl >/dev/null 2>&1 || pkgs+=(wmctrl)
-    command -v xprop  >/dev/null 2>&1 || pkgs+=(xorg-xprop)
-    _gst_ok         || pkgs+=(gst-plugins-bad gst-plugins-good)
-    [[ ${#pkgs[@]} -gt 0 ]] && sudo pacman -S --needed --noconfirm "${pkgs[@]}"
+    command -v wget    >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl    >/dev/null 2>&1 || pkgs+=(curl)
+    command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
+    command -v xprop   >/dev/null 2>&1 || pkgs+=(xorg-xprop)
+    command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    command -v file    >/dev/null 2>&1 || pkgs+=(file)
+    command -v cabextract >/dev/null 2>&1 || pkgs+=(cabextract)
+    _gst_ok          || pkgs+=(gst-plugins-bad gst-plugins-good)
+    [[ ${#pkgs[@]} -gt 0 ]] && _pm_install "${pkgs[@]}"
 }
 
 _install_deps_dnf() {
-    local pkgs=()
-    command -v wget   >/dev/null 2>&1 || pkgs+=(wget)
-    command -v curl   >/dev/null 2>&1 || pkgs+=(curl)
-    command -v wmctrl >/dev/null 2>&1 || pkgs+=(wmctrl)
-    command -v xprop  >/dev/null 2>&1 || pkgs+=(xprop)
-    _gst_ok         || pkgs+=(gstreamer1-plugins-bad-free gstreamer1-plugins-good)
-    [[ ${#pkgs[@]} -gt 0 ]] && sudo dnf install -y "${pkgs[@]}"
+    local pkgs=(freetype.i686)
+    command -v wget    >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl    >/dev/null 2>&1 || pkgs+=(curl)
+    command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
+    command -v xprop   >/dev/null 2>&1 || pkgs+=(xprop)
+    command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    command -v file    >/dev/null 2>&1 || pkgs+=(file)
+    command -v cabextract >/dev/null 2>&1 || pkgs+=(cabextract)
+    _gst_ok          || pkgs+=(gstreamer1-tools gstreamer1-plugins-bad-free gstreamer1-plugins-good)
+    _pm_install "${pkgs[@]}"
 }
 
 _install_deps_apt() {
     local pkgs=(dirmngr ca-certificates)
-    command -v wget   >/dev/null 2>&1 || pkgs+=(wget)
-    command -v curl   >/dev/null 2>&1 || pkgs+=(curl)
-    command -v wmctrl >/dev/null 2>&1 || pkgs+=(wmctrl)
-    command -v xprop  >/dev/null 2>&1 || pkgs+=(x11-utils)
-    _gst_ok         || pkgs+=(gstreamer1.0-plugins-bad gstreamer1.0-plugins-good)
-    sudo apt install -y "${pkgs[@]}"
+    command -v wget    >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl    >/dev/null 2>&1 || pkgs+=(curl)
+    command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
+    command -v xprop   >/dev/null 2>&1 || pkgs+=(x11-utils)
+    command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    command -v file    >/dev/null 2>&1 || pkgs+=(file)
+    command -v cabextract >/dev/null 2>&1 || pkgs+=(cabextract)
+    _gst_ok          || pkgs+=(gstreamer1.0-plugins-bad gstreamer1.0-plugins-good)
+    _pm_install "${pkgs[@]}"
 }
 
 # log file
@@ -381,8 +464,592 @@ else
     echo "CSPenguin-Installer > $(date)" >> "$LOG_FILE"
 fi
 
+# catch anything set -e would otherwise abort on without a friendly message
+trap '_on_error "$LINENO" "$BASH_COMMAND"' ERR
+
+# detect Wine version of existing install is actually using
+_detect_installed_wine() {
+    [[ -f "$LAUNCH_SCRIPT" ]] || return 1
+    local _v
+    _v=$(grep -oP 'wine-\K[0-9]+\.[0-9]+' "$LAUNCH_SCRIPT" 2>/dev/null | head -1)
+    [[ -n "$_v" ]] || return 1
+    echo "$_v"
+}
+
+# compare two Wine version strings (e.g. "11.4" vs "11.12")
+# echoes 1 if $1 > $2, -1 if $1 < $2, 0 if equal
+_wine_version_cmp() {
+    [[ "$1" == "$2" ]] && { echo 0; return; }
+    local _newest
+    _newest=$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)
+    [[ "$_newest" == "$1" ]] && echo 1 || echo -1
+}
+
+# ============================================================
+# detect latest Wine version from Kron4ek (excluding Proton)
+# ============================================================
+_latest_kron4ek_wine() {
+    local _tags
+    _tags=$(curl -s "https://api.github.com/repos/Kron4ek/Wine-Builds/releases" 2>/dev/null \
+            | grep -oP '"tag_name":\s*"\K[^"]+' | grep -v '^proton' | head -20)
+    if [[ -n "$_tags" ]]; then
+        echo "$_tags" | head -1
+    fi
+}
+
+# ============================================================
+# fetch a patch file from local or remote
+# ============================================================
+_try_fetch_patch() {
+    local _dir="$1" _rel="$2" _file="$3"
+    [[ -f "$_dir/$_file" ]] && return 0
+    mkdir -p "$_dir"
+    local _tmp="${_dir}/${_file}.part"
+    if wget -q -O "$_tmp" "$GH_RAW/$_rel/$_file" 2>/dev/null; then
+        mv "$_tmp" "$_dir/$_file"
+        return 0
+    fi
+    rm -f "$_tmp" 2>/dev/null
+    return 1
+}
+
+# ============================================================
+# extract Wine tarball to LAUNCHER_DIR
+# ============================================================
+_extract_wine() {
+    local _wine_tar="$1"
+    info "extracting Wine ${WINE_VERSION}..."
+    rm -rf "$WINE_DIR"
+    mkdir -p "$LAUNCHER_DIR"
+    tar -xf "$_wine_tar" -C "$LAUNCHER_DIR"
+    for _d in "$LAUNCHER_DIR/wine-${WINE_VERSION}-staging-amd64" \
+               "$LAUNCHER_DIR/wine-${WINE_VERSION}-amd64" \
+               "$LAUNCHER_DIR/wine-${WINE_VERSION}-plain-amd64"; do
+        [[ -d "$_d" ]] && mv "$_d" "$WINE_DIR" && break
+    done
+    [[ -x "$WINE_BIN" ]] || die "Wine ${WINE_VERSION} extraction failed"
+    ok "Wine ${WINE_VERSION} extracted"
+}
+
+# ============================================================
+# bundle FreeType into WINE_DIR
+# ============================================================
+# map a missing freetype dependency (.so name) to the distro packages that
+# provide it (native + 32-bit variant)
+_freetype_dep_pkgs() {
+    local lib="$1" pm="$2"
+    case "$pm" in
+        pacman)
+            case "$lib" in
+                libz.so*)        echo "zlib lib32-zlib" ;;
+                libbz2.so*)      echo "bzip2 lib32-bzip2" ;;
+                libpng16.so*)    echo "libpng lib32-libpng" ;;
+                libharfbuzz.so*) echo "harfbuzz lib32-harfbuzz" ;;
+                libbrotli*.so*)  echo "brotli lib32-brotli" ;;
+            esac ;;
+        dnf)
+            case "$lib" in
+                libz.so*)        echo "zlib zlib.i686" ;;
+                libbz2.so*)      echo "bzip2-libs bzip2-libs.i686" ;;
+                libpng16.so*)    echo "libpng libpng.i686" ;;
+                libharfbuzz.so*) echo "harfbuzz harfbuzz.i686" ;;
+                libbrotli*.so*)  echo "brotli brotli.i686" ;;
+            esac ;;
+        apt)
+            case "$lib" in
+                libz.so*)        echo "zlib1g zlib1g:i386" ;;
+                libbz2.so*)      echo "libbz2-1.0 libbz2-1.0:i386" ;;
+                libpng16.so*)    echo "libpng16-16 libpng16-16:i386" ;;
+                libharfbuzz.so*) echo "libharfbuzz0b libharfbuzz0b:i386" ;;
+                libbrotli*.so*)  echo "libbrotli1 libbrotli1:i386" ;;
+            esac ;;
+    esac
+}
+
+# unique list of the shared libraries the bundled FreeType cannot resolve
+_freetype_missing() {
+    ldd "$FREETYPE_DIR/lib64/libfreetype.so.6" "$FREETYPE_DIR/lib32/libfreetype.so.6" 2>/dev/null \
+        | grep "not found" \
+        | sed 's/^[[:space:]]*\([^ ]*\) => not found.*/\1/' \
+        | sort -u \
+        || true
+}
+
+# copy-pasteable fix command for the given libs
+_freetype_fix_hint() {
+    local pm="$1"; shift
+    local prefix pkgs=() lib _pair _bits
+    case "$pm" in
+        pacman) prefix="sudo pacman -S" ;;
+        dnf)    prefix="sudo dnf install" ;;
+        apt)    prefix="sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install" ;;
+        *)      return ;;
+    esac
+    for lib in "$@"; do
+        _pair=$(_freetype_dep_pkgs "$lib" "$pm")
+        [[ -n "$_pair" ]] || continue
+        read -r -a _bits <<< "$_pair"
+        [[ ${#_bits[@]} -ge 2 ]] || continue
+        pkgs+=("${_bits[1]}")
+    done
+    [[ ${#pkgs[@]} -gt 0 ]] || return
+    printf 'install the 32-bit libraries, for example:\n    %s %s\n' "$prefix" "${pkgs[*]}"
+}
+
+# some distros ship a library under a different soname than the Arch-built
+# FreeType expects (e.g. Fedora ships libbz2.so.1, FreeType wants libbz2.so.1.0).
+# if the real file exists on disk, link the expected name to it.
+_freetype_fix_symlink() {
+    local lib="$1"
+    local base="${lib%.so*}.so"
+    local real target
+    while IFS= read -r real; do
+        [[ -f "$real" ]] || continue
+        target="${real%/*}/$lib"
+        [[ -e "$target" ]] && continue
+        info "linking ${target##*/} -> $(basename "$real")"
+        sudo ln -s "$(basename "$real")" "$target" 2>/dev/null || true
+    done < <(find /usr/lib /usr/lib32 /usr/lib64 /lib /lib32 /lib64 -maxdepth 1 -name "$base.*" -type f 2>/dev/null)
+}
+
+# ensure the bundled FreeType can resolve its dependencies, installing the
+# missing 32-bit libraries when possible; dies with a fix hint if not
+_freetype_resolve() {
+    local _missing _pkgs=() _lib _pair _pm _hint
+    _missing=$(_freetype_missing)
+    [[ -n "$_missing" ]] || return 0
+    if [[ $DRY_RUN -eq 1 ]]; then
+        info "FreeType needs extra libraries (dry run, not installing): $(tr '\n' ' ' <<< "$_missing")"
+        return 0
+    fi
+    _pm="$(_detect_pm)"
+    [[ "$_pm" != "unknown" ]] || die "bundled FreeType is missing dependencies: $(tr '\n' ' ' <<< "$_missing")
+install the missing 32-bit libraries for your distribution, then re-run the installer"
+    while IFS= read -r _lib; do
+        read -r -a _pair <<< "$(_freetype_dep_pkgs "$_lib" "$_pm")"
+        _pkgs+=("${_pair[@]}")
+    done <<< "$_missing"
+    if [[ ${#_pkgs[@]} -gt 0 ]]; then
+        info "installing FreeType dependencies: ${_pkgs[*]}"
+        if [[ "$_pm" == "apt" ]]; then
+            sudo dpkg --add-architecture i386 2>/dev/null || true
+            sudo apt update 2>/dev/null || true
+        fi
+        _pm_install "${_pkgs[@]}" || true
+    fi
+    _missing=$(_freetype_missing)
+    if [[ -n "$_missing" ]]; then
+        while IFS= read -r _lib; do
+            _freetype_fix_symlink "$_lib"
+        done <<< "$_missing"
+        _missing=$(_freetype_missing)
+    fi
+    if [[ -n "$_missing" ]]; then
+        _hint=$(_freetype_fix_hint "$_pm" $_missing)
+        if [[ -n "$_hint" ]]; then
+            die "bundled FreeType is still missing dependencies: $(tr '\n' ' ' <<< "$_missing")
+
+$_hint
+then re-run the installer"
+        else
+            die "bundled FreeType is still missing dependencies: $(tr '\n' ' ' <<< "$_missing")
+install the missing 32-bit libraries for your distribution, then re-run the installer"
+        fi
+    fi
+}
+
+_bundle_freetype() {
+    local _freetype_tar="$DOWNLOAD_DIR/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
+    local _freetype32_tar="$DOWNLOAD_DIR/lib32-freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
+    local _extract_dir
+    if [[ ! -f "$_freetype_tar" ]]; then
+        download_progress "FreeType ${FREETYPE_VERSION}" "$FREETYPE_URL" "$_freetype_tar"
+    else
+        ok "FreeType ${FREETYPE_VERSION} (cached)"
+    fi
+    if [[ ! -f "$_freetype32_tar" ]]; then
+        download_progress "FreeType ${FREETYPE_VERSION} (32-bit)" "$FREETYPE32_URL" "$_freetype32_tar"
+    else
+        ok "FreeType ${FREETYPE_VERSION} 32-bit (cached)"
+    fi
+    info "bundling FreeType ${FREETYPE_VERSION} (32-bit + 64-bit)..."
+    rm -rf "$FREETYPE_DIR"
+    mkdir -p "$FREETYPE_DIR/lib64" "$FREETYPE_DIR/lib32"
+    _extract_dir=$(mktemp -d "${TMPDIR:-/tmp}/csp-freetype.XXXXXX")
+    (
+        trap 'rm -rf -- "$_extract_dir"' EXIT
+        unzstd -c "$_freetype_tar" | tar -xf - -C "$_extract_dir"
+        cp "$_extract_dir"/usr/lib/libfreetype.so* "$FREETYPE_DIR/lib64/"
+        rm -rf "$_extract_dir/usr/lib"
+        unzstd -c "$_freetype32_tar" | tar -xf - -C "$_extract_dir"
+        cp "$_extract_dir"/usr/lib32/libfreetype.so* "$FREETYPE_DIR/lib32/"
+    )
+    _freetype_resolve
+    ok "FreeType ${FREETYPE_VERSION} bundled"
+}
+
+# ============================================================
+# write both launcher scripts (PAINT + STUDIO)
+# ============================================================
+_write_launchers() {
+    cat > "$LAUNCH_SCRIPT" << LAUNCHEOF
+#!/usr/bin/env bash
+export LD_LIBRARY_PATH="$FREETYPE_DIR/lib64:$FREETYPE_DIR/lib32:\${LD_LIBRARY_PATH:-}"
+export PATH="$WINE_DIR/bin:\$PATH"
+export WINESERVER="$WINESERVER_BIN"
+export WINEPREFIX="$WINEPREFIX"
+export WINEDEBUG=-all
+export WINEESYNC=1
+export WINEFSYNC=1
+export STAGING_SHARED_MEMORY=1
+export STAGING_WRITECOPY=1
+export WINE_NO_WRITE_CONSOLE=1
+export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
+export DXVK_ASYNC=1
+export DXVK_STATE_CACHE=1
+export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
+export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
+export mesa_glthread=true
+export __GL_SHADER_DISK_CACHE=1
+export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
+export RADV_PERFTEST=gpl
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-background-networking --no-first-run --disable-sync --disable-renderer-accessibility --disable-extensions --disable-component-extensions-with-background-pages --disk-cache-size=33554432 --disable-features=msEdgeSidebar"
+CSP_EXE="$CSP_INSTALL_PATH"
+
+# Pre-load material database into page cache to help speed up loading of materials.
+# CSP stores materials as SQLite files under Documents/CELSYS/ (older versions), and AppData.
+_CSP_USER="$WINEPREFIX/drive_c/users/\$(whoami)"
+for _MATS_DIR in "\$_CSP_USER/Documents/CELSYS" "\$_CSP_USER/AppData/Roaming/CELSYS" "\$_CSP_USER/AppData/Local/CELSYS"; do
+    [[ -d "\$_MATS_DIR" ]] || continue
+    find "\$_MATS_DIR" -name "*.sqlite" -o -name "*.db" 2>/dev/null | while read -r _f; do
+        cat "\$_f" > /dev/null 2>&1 &
+    done
+done
+wait
+
+if [[ -n "\$1" ]] && command -v winepath &>/dev/null; then
+    WIN_PATH="\$(WINEPREFIX="$WINEPREFIX" winepath --windows "\$1")"
+    wine "\$CSP_EXE" "\$WIN_PATH" &
+else
+    wine "\$CSP_EXE" &
+fi
+WINE_PID=\$!
+
+if command -v wmctrl &>/dev/null && command -v xprop &>/dev/null; then
+    (
+        while kill -0 "\$WINE_PID" 2>/dev/null; do
+            while IFS= read -r _wid; do
+                _st=\$(xprop -id "\$_wid" _NET_WM_STATE 2>/dev/null)
+                if [[ "\$_st" == *FULLSCREEN* ]]; then
+                    wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
+                    xprop -id "\$_wid" -spy _NET_WM_STATE 2>/dev/null | while IFS= read -r _line; do
+                        [[ "\$_line" == *FULLSCREEN* ]] && wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
+                    done
+                    exit 0
+                fi
+            done < <(xprop -root _NET_CLIENT_LIST 2>/dev/null | tr ',' '\n' | while IFS= read -r _r; do
+                _w=\$(echo "\$_r" | tr -d ' #')
+                [[ \$(xprop -id "0x\$_w" WM_CLASS 2>/dev/null) == *clipstudiopaint* ]] && echo "0x\$_w"
+            done)
+            sleep 0.5
+        done
+    ) &
+fi
+
+wait "\$WINE_PID"
+LAUNCHEOF
+    chmod +x "$LAUNCH_SCRIPT"
+
+    cat > "$LAUNCHER_STUDIO" << LAUNCHEOF
+#!/usr/bin/env bash
+export LD_LIBRARY_PATH="$FREETYPE_DIR/lib64:$FREETYPE_DIR/lib32:\${LD_LIBRARY_PATH:-}"
+export PATH="$WINE_DIR/bin:\$PATH"
+export WINESERVER="$WINESERVER_BIN"
+export WINEPREFIX="$WINEPREFIX"
+export WINEDEBUG=-all
+export WINEESYNC=1
+export WINEFSYNC=1
+export STAGING_SHARED_MEMORY=1
+export STAGING_WRITECOPY=1
+export WINE_NO_WRITE_CONSOLE=1
+export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
+export DXVK_ASYNC=1
+export DXVK_STATE_CACHE=1
+export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
+export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
+export mesa_glthread=true
+export __GL_SHADER_DISK_CACHE=1
+export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
+export RADV_PERFTEST=gpl
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-renderer-accessibility --disable-extensions --disable-component-extensions-with-background-pages --disk-cache-size=33554432 --disable-features=msEdgeSidebar"
+exec wine "$STUDIO_EXE"
+LAUNCHEOF
+    chmod +x "$LAUNCHER_STUDIO"
+}
+
+_write_prewarm_service() {
+    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$HOME/.config/systemd/user/csp-wineserver.service" << EOF
+[Unit]
+Description=Wine server pre-warm for CSP
+After=default.target
+
+[Service]
+Type=simple
+Environment=PATH=$WINE_DIR/bin:/usr/bin
+Environment=WINEPREFIX=$WINEPREFIX
+Environment=WINESERVER=$WINESERVER_BIN
+Environment=WINEDEBUG=-all
+ExecStartPre=-$WINESERVER_BIN -k
+ExecStartPre=-/usr/bin/bash -c 'for d in "$WINEPREFIX/drive_c/users/$(whoami)/Documents/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Roaming/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Local/CELSYS"; do [ -d "$d" ] && find "$d" -name "*.sqlite" -o -name "*.db" | while read f; do cat "$f" > /dev/null 2>&1 & done; done; wait'
+ExecStart=$WINESERVER_BIN -f -p
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+_install_patches() {
+    local _patches_win="$SCRIPT_DIR/patches/x86_64-windows-wine${WINE_VERSION}"
+    local _patches_unix="$SCRIPT_DIR/patches/x86_64-unix-wine${WINE_VERSION}"
+
+    if [[ ! -f "$_patches_win/mfplat.dll" ]] ||
+       [[ ! -f "$_patches_win/mfreadwrite.dll" ]] ||
+       [[ ! -f "$_patches_win/winegstreamer.dll" ]] ||
+       [[ ! -f "$_patches_unix/winegstreamer.so" ]]; then
+        # try to fetch the exact version from remote
+        local _fallback="$DOWNLOAD_DIR/patches/x86_64-windows-wine${WINE_VERSION}"
+        if _try_fetch_patch "$_fallback" "patches/x86_64-windows-wine${WINE_VERSION}" "mfplat.dll" &&
+           _try_fetch_patch "$_fallback" "patches/x86_64-windows-wine${WINE_VERSION}" "mfreadwrite.dll" &&
+           _try_fetch_patch "$_fallback" "patches/x86_64-windows-wine${WINE_VERSION}" "winegstreamer.dll"; then
+            _patches_win="$_fallback"
+            local _ufallback="$DOWNLOAD_DIR/patches/x86_64-unix-wine${WINE_VERSION}"
+            _try_fetch_patch "$_ufallback" "patches/x86_64-unix-wine${WINE_VERSION}" "winegstreamer.so" || true
+            _patches_unix="$_ufallback"
+        fi
+    fi
+
+    local _ok=0
+    if [[ -f "$_patches_win/mfplat.dll" ]] &&
+       [[ -f "$_patches_win/mfreadwrite.dll" ]] &&
+       [[ -f "$_patches_win/winegstreamer.dll" ]] &&
+       [[ -f "$_patches_unix/winegstreamer.so" ]]; then
+        mkdir -p "$SYS32"
+        local _wine_win="$WINE_DIR/lib/wine/x86_64-windows"
+        [[ -d "$_wine_win" ]] || _wine_win="$WINE_DIR/lib64/wine/x86_64-windows"
+        local _wine_unix="$WINE_DIR/lib/wine/x86_64-unix"
+        [[ -d "$_wine_unix" ]] || _wine_unix="$WINE_DIR/lib64/wine/x86_64-unix"
+
+        if [[ -d "$_wine_win" ]]; then
+            for dll in mfplat.dll mfreadwrite.dll winegstreamer.dll; do
+                [[ -f "$_patches_win/$dll" ]] && cp "$_patches_win/$dll" "$_wine_win/$dll" && cp "$_patches_win/$dll" "$SYS32/$dll"
+            done
+            _ok=1
+        fi
+        if [[ -d "$_patches_unix" ]] && [[ -d "$_wine_unix" ]]; then
+            [[ -f "$_patches_unix/winegstreamer.so" ]] && cp "$_patches_unix/winegstreamer.so" "$_wine_unix/winegstreamer.so"
+        fi
+    fi
+
+    if [[ $_ok -eq 1 ]]; then
+        if ! run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfplat" /t REG_SZ /d "native,builtin" /f ||
+           ! run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfreadwrite" /t REG_SZ /d "native,builtin" /f; then
+            # wine reg add can potentially fail during a Wine version upgrade (prefix migration,
+            # new wineserver not ready).  Fall back to writing a .reg file directly.
+            local _reg_tmp="$WINEPREFIX/drive_c/windows/Temp/mf-overrides.reg"
+            cat > "$_reg_tmp" << 'REGEOF'
+REGEDIT4
+
+[HKEY_CURRENT_USER\Software\Wine\DllOverrides]
+"mfplat"="native,builtin"
+"mfreadwrite"="native,builtin"
+REGEOF
+            run wine regedit /S 'C:\windows\Temp\mf-overrides.reg' || warn "failed to set mfplat/mfreadwrite overrides"
+            rm -f "$_reg_tmp"
+        fi
+        ok "patches applied: video export"
+    else
+        warn "exact patches not available for Wine ${WINE_VERSION}; video export may not work"
+    fi
+}
+
+# existing install found and no mode flag given -- ask what to do
+if [[ $UPDATE_ONLY -eq 0 ]] && [[ $UPDATE_WINE -eq 0 ]] && [[ -f "$LAUNCH_SCRIPT" ]]; then
+    _found_wine=$(_detect_installed_wine || echo "unknown")
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}existing CSPenguin install found${RESET} ${DIM}(Wine $_found_wine, $LAUNCHER_DIR)${RESET}"
+    echo ""
+    echo "    1) update       - regenerate launch scripts/config only; keeps your CSP install and Wine version as-is (fast)"
+    echo "    2) update wine  - install or repair the supported bundled Wine runtime"
+    echo "    3) reinstall    - run the full installer again"
+    echo "    4) cancel"
+    echo ""
+    _choice=""
+    read -t 10 -rp "  choice [will automatically cancel in 10s]: " _choice </dev/tty || true
+    echo ""
+    _log "menu (existing install found): choice='${_choice:-<empty/timeout>}'"
+    case "${_choice:-4}" in
+        1) UPDATE_ONLY=1; info "selected: update" ;;
+        2) UPDATE_WINE=1; info "selected: update wine" ;;
+        3) ok "proceeding with fresh install" ;;
+        *) info "cancelled"; exit 0 ;;
+    esac
+fi
+
+# --update/--update-wine given but no existing install found
+if [[ $UPDATE_ONLY -eq 1 || $UPDATE_WINE -eq 1 ]] && [[ ! -f "$LAUNCH_SCRIPT" ]]; then
+    _flag_name="--update"
+    [[ $UPDATE_WINE -eq 1 ]] && _flag_name="--update-wine"
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}no existing CSPenguin install found${RESET} ${DIM}($LAUNCHER_DIR)${RESET}"
+    echo "  $_flag_name needs an existing install to update."
+    echo ""
+    echo "    1) install now - run a full fresh install instead"
+    echo "    2) cancel"
+    echo ""
+    _choice=""
+    read -t 10 -rp "  choice [will automatically cancel in 10s]: " _choice </dev/tty || true
+    echo ""
+    _log "menu (no existing install, $_flag_name given): choice='${_choice:-<empty/timeout>}'"
+    case "${_choice:-2}" in
+        1) UPDATE_ONLY=0; UPDATE_WINE=0; ok "proceeding with fresh install" ;;
+        *) info "cancelled"; exit 0 ;;
+    esac
+fi
+
+# ============================================================
+# --update-wine / -w : install the supported Wine runtime without reinstalling CSP
+# ============================================================
+if [[ $UPDATE_WINE -eq 1 ]]; then
+    echo ""
+    echo -e "  ${TEAL}${BOLD}[*] Wine update mode${RESET}"
+    echo ""
+
+    # detect currently installed Wine version
+    _current_wine=$(_detect_installed_wine) \
+        || die "could not detect installed Wine version from $LAUNCH_SCRIPT"
+    info "currently installed:     Wine $_current_wine"
+    info "this installer supports: Wine $WINE_VERSION"
+
+    # informational only -- let the user know if upstream has moved past
+    # what this installer currently supports
+    info "checking upstream for newer Wine releases..."
+    _upstream_latest=$(_latest_kron4ek_wine || true)
+    if [[ -n "$_upstream_latest" ]] && [[ "$_upstream_latest" != "$WINE_VERSION" ]]; then
+        warn "Wine $_upstream_latest is available upstream, but this installer's patches are only tested against Wine $WINE_VERSION"
+        info "check https://github.com/parka6060/CSPenguin-Installer for an updated installer script"
+    fi
+
+    if [[ "$_current_wine" == "$WINE_VERSION" ]]; then
+        echo ""
+        echo -e "  ${YELLOW}${BOLD}already at supported Wine $WINE_VERSION${RESET} ${DIM}-- nothing to update${RESET}"
+        echo ""
+        echo "    1) update    - regenerate launch scripts/config anyway"
+        echo "    2) reinstall - run the full installer again"
+        echo "    3) cancel"
+        echo ""
+        _choice=""
+        read -t 10 -rp "  choice [will automatically cancel in 10s]: " _choice </dev/tty || true
+        echo ""
+        _log "menu (already at supported Wine $WINE_VERSION): choice='${_choice:-<empty/timeout>}'"
+        case "${_choice:-3}" in
+            1) UPDATE_WINE=0; UPDATE_ONLY=1; info "selected: update" ;;
+            2) UPDATE_WINE=0; UPDATE_ONLY=0; ok "proceeding with fresh install" ;;
+            *) info "cancelled"; exit 0 ;;
+        esac
+    else
+        if [[ "$(_wine_version_cmp "$WINE_VERSION" "$_current_wine")" == "-1" ]]; then
+            echo ""
+            echo -e "  ${YELLOW}${BOLD}current wine version: $_current_wine is newer than the recommended wine version: $WINE_VERSION${RESET}"
+            echo -e "  ${DIM}continuing will downgrade to $WINE_VERSION to ensure compatibility.${RESET}"
+            echo ""
+            _confirm=""
+            read -t 10 -rp "  continue with downgrade? [y/N, cancels in 10s]: " _confirm </dev/tty || true
+            _log "downgrade confirmation ($_current_wine -> $WINE_VERSION): answer='${_confirm:-<empty/timeout>}'"
+            [[ "$_confirm" =~ ^[Yy]$ ]] || { info "cancelled"; exit 0; }
+            ok "downgrading Wine $_current_wine -> $WINE_VERSION"
+        else
+            ok "upgrading Wine $_current_wine -> $WINE_VERSION"
+        fi
+
+        # download the supported Wine build
+        _wine_url="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
+        _wine_tar="$DOWNLOAD_DIR/wine-${WINE_VERSION}-amd64.tar.xz"
+        mkdir -p "$DOWNLOAD_DIR"
+        download_progress "Wine ${WINE_VERSION}" "$_wine_url" "$_wine_tar"
+
+        _extract_wine "$_wine_tar"
+        _bundle_freetype
+
+        # Keep an existing opt-in pre-warm service pointed at the new runtime.
+        _prewarm_service="$HOME/.config/systemd/user/csp-wineserver.service"
+        if [[ -f "$_prewarm_service" ]]; then
+            _prewarm_enabled=0
+            systemctl --user is-enabled csp-wineserver.service &>/dev/null && _prewarm_enabled=1
+            _write_prewarm_service
+            systemctl --user daemon-reload 2>/dev/null || warn "could not reload wineserver service"
+            if [[ $_prewarm_enabled -eq 1 ]]; then
+                systemctl --user restart csp-wineserver.service 2>/dev/null \
+                    || warn "could not restart wineserver service"
+            fi
+        fi
+
+        # clean up old Wine version
+        _old_wine_dir="$LAUNCHER_DIR/wine-${_current_wine}"
+        if [[ -d "$_old_wine_dir" ]] && [[ "$_old_wine_dir" != "$WINE_DIR" ]]; then
+            rm -rf "$_old_wine_dir"
+            info "removed old Wine ${_current_wine}"
+        fi
+
+        export PATH="$WINE_DIR/bin:$PATH"
+        export WINEPREFIX WINEARCH WINESERVER="$WINESERVER_BIN"
+
+        # dcomp (login/store panels) – always needed
+        DCOMP_DLL="$SCRIPT_DIR/patches/dcomp/dcomp.dll"
+        PTHREAD_DLL="$SCRIPT_DIR/patches/dcomp/libwinpthread-1.dll"
+        ensure_asset "patches/dcomp/dcomp.dll"          "$DCOMP_DLL"
+        ensure_asset "patches/dcomp/libwinpthread-1.dll" "$PTHREAD_DLL"
+        [[ -f "$DCOMP_DLL" ]] || die "dcomp.dll not found"
+        cp "$DCOMP_DLL"    "$LAUNCHER_DIR/dcomp.dll"
+        mkdir -p "$SYS32"
+        cp "$DCOMP_DLL"    "$SYS32/dcomp.dll"
+        cp "$PTHREAD_DLL"  "$SYS32/libwinpthread-1.dll"
+        run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "dcomp" /t REG_SZ /d "native,builtin" /f || true
+        ok "dcomp.dll (login/store panels)"
+
+        _install_patches
+
+        _write_launchers
+        info "launcher scripts regenerated"
+
+        # refresh desktop database
+        update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+
+        # kill old wineserver, start new one
+        "$WINESERVER_BIN" -k 2>/dev/null || true
+
+        ok "update to Wine ${WINE_VERSION} complete!"
+        exit 0
+    fi
+fi
+
 # --update: skip install steps, just regenerate launch scripts + config
 if [[ $UPDATE_ONLY -eq 1 ]]; then
+    # WINE_VERSION above is the pin, not necessarily what's on disk -- if it
+    # doesn't exist, fall back to whatever Wine version is actually installed.
+    if [[ ! -d "$WINE_DIR" ]]; then
+        _installed_wine=$(_detect_installed_wine || true)
+        if [[ -n "$_installed_wine" ]] && [[ -d "$LAUNCHER_DIR/wine-${_installed_wine}" ]]; then
+            WINE_VERSION="$_installed_wine"
+            WINE_DIR="$LAUNCHER_DIR/wine-${WINE_VERSION}"
+            WINE_BIN="$WINE_DIR/bin/wine"
+            WINESERVER_BIN="$WINE_DIR/bin/wineserver"
+            FREETYPE_DIR="$WINE_DIR/lib/freetype2-${FREETYPE_VERSION}"
+        fi
+    fi
+
     export PATH="$WINE_DIR/bin:$PATH"
     export WINEPREFIX WINEARCH WINESERVER="$WINESERVER_BIN"
 
@@ -407,9 +1074,12 @@ if [[ $UPDATE_ONLY -eq 1 ]]; then
 dxgi.deferSurfaceCreation = True
 dxvk.enableGraphicsPipelineLibrary = True
 dxvk.numCompilerThreads = 0
+dxvk.maxChunkSize = 16
 DXVKEOF
     ok "registry + dxvk.conf"
     install_cjk_font_fix
+    _bundle_freetype
+    _install_gecko
 
     # fall through to step 6 and step 7, heh 6 7 >:D
 fi
@@ -430,9 +1100,16 @@ echo -e "      \___)=(___/  ${DIM}and set system limits.${RESET}"
 echo ""
 echo ""
 echo -e "  ${BOLD}Which version of Clip Studio Paint?${RESET}"
-echo "    1) 5.0.1 (latest)"
-echo "    2) 4.1.0 (previous stable)"
-echo "    3) custom installer path or URL"
+echo "    1) 5.1.2 (latest)"
+echo "    2) 5.0.4 (perpetual)"
+echo "    3) 4.1.0"
+echo "    4) 4.0.10 (perpetual)"
+echo "    5) 3.2.3"
+echo "    6) 3.0.8 (perpetual)"
+echo "    7) 2.3.4"
+echo "    8) 2.0.6 (perpetual)"
+echo "    9) 1.13.2"
+echo "    10) custom installer path or URL"
 echo ""
 
 CSP_VERSION="" CSP_URL="" CSP_EXE_NAME=""
@@ -440,9 +1117,16 @@ while true; do
     read -rp "  choice [1]: " choice </dev/tty
     choice="${choice:-1}"
     case "$choice" in
-        1) CSP_VERSION="501"; break ;;
-        2) CSP_VERSION="410"; break ;;
-        3)
+        1) CSP_VERSION="512"; break ;;
+        2) CSP_VERSION="504"; break ;;
+        3) CSP_VERSION="410"; break ;;
+        4) CSP_VERSION="4010"; break ;;
+        5) CSP_VERSION="323"; break ;;
+        6) CSP_VERSION="308"; break ;;
+        7) CSP_VERSION="234"; break ;;
+        8) CSP_VERSION="206"; break ;;
+        9) CSP_VERSION="1132"; break ;;
+        10)
             read -rp "  path or URL: " custom </dev/tty
             if [[ "$custom" == http* ]]; then
                 CSP_URL="$custom"
@@ -460,7 +1144,7 @@ while true; do
                 echo "  file not found: $custom"; continue
             fi
             break ;;
-        *) echo "  pick 1, 2, or 3" ;;
+        *) echo "  pick 1-10" ;;
     esac
 done
 
@@ -476,6 +1160,11 @@ info "checking for required system packages..."
 _missing=()
 command -v wget >/dev/null 2>&1 || _missing+=(wget)
 command -v curl >/dev/null 2>&1 || _missing+=(curl)
+command -v unzstd >/dev/null 2>&1 || _missing+=(zstd)
+command -v wmctrl >/dev/null 2>&1 || _missing+=(wmctrl)
+command -v xprop >/dev/null 2>&1 || _missing+=(xprop)
+command -v file >/dev/null 2>&1 || _missing+=(file)
+command -v cabextract >/dev/null 2>&1 || _missing+=(cabextract)
 _gst_ok         || _missing+=("gstreamer plugins")
 
 if [[ ${#_missing[@]} -gt 0 ]]; then
@@ -484,7 +1173,7 @@ if [[ ${#_missing[@]} -gt 0 ]]; then
     if [[ "$_pm" == "unknown" ]]; then
         die "unsupported distro, install wget, curl, and gstreamer plugins manually"
     fi
-    printf "  ${TEAL}│${RESET} "
+    printf "  ${TEAL}│${RESET} " || true
     read -rp "  install automatically? [Y/n]: " _ans </dev/tty
     if [[ "${_ans:-y}" =~ ^[Yy]$ ]]; then
         if [[ $DRY_RUN -eq 1 ]]; then
@@ -578,22 +1267,22 @@ if [[ ${#_dl_pids[@]} -gt 0 ]]; then
 fi
 
 if [[ $_need_wine -eq 1 ]] && [[ $DRY_RUN -eq 0 ]]; then
-    info "extracting Wine ${WINE_VERSION}..."
-    rm -rf "$WINE_DIR"
-    mkdir -p "$LAUNCHER_DIR"
-    tar -xf "$_wine_tar" -C "$LAUNCHER_DIR"
-    for _d in "$LAUNCHER_DIR/wine-${WINE_VERSION}-staging-amd64" \
-               "$LAUNCHER_DIR/wine-${WINE_VERSION}-amd64" \
-               "$LAUNCHER_DIR/wine-${WINE_VERSION}-plain-amd64"; do
-        [[ -d "$_d" ]] && mv "$_d" "$WINE_DIR" && break
-    done
-    [[ -x "$WINE_BIN" ]] || die "Wine ${WINE_VERSION} extraction failed"
-    ok "Wine ${WINE_VERSION} extracted"
+    _extract_wine "$_wine_tar"
+    _bundle_freetype
 fi
 
 if [[ $DRY_RUN -eq 0 ]]; then
     chmod +x "$WINETRICKS_BIN"
     export PATH="$WINE_DIR/bin:$PATH"
+fi
+
+# For debugging when using a VM, avoids error during testing
+if [[ -z "${LIBGL_ALWAYS_SOFTWARE:-}" ]] \
+    && command -v systemd-detect-virt >/dev/null 2>&1 \
+    && [[ "$(systemd-detect-virt 2>/dev/null)" != "none" ]]; then
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+    ok "Mesa software rendering (VM without working DRI3)"
 fi
 
 # [3/7] wine prefix
@@ -664,6 +1353,8 @@ else
     fi
 fi
 
+_install_gecko
+
 # compatibility settings (must be after winetricks, dotnet48 resets the version)
 if [[ $DRY_RUN -eq 0 ]]; then
     run wine reg add "HKCU\\Software\\Wine" /v Version /t REG_SZ /d "win10" /f || warn "failed to set windows version"
@@ -678,6 +1369,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 dxgi.deferSurfaceCreation = True
 dxvk.enableGraphicsPipelineLibrary = True
 dxvk.numCompilerThreads = 0
+dxvk.maxChunkSize = 16
 EOF
 fi
 ok "windows version: win10"
@@ -702,31 +1394,7 @@ else
     run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "dcomp" /t REG_SZ /d "native,builtin" /f || warn "failed to set dcomp override"
     ok "dcomp.dll (login/store panels)"
 
-    PATCHES_WIN="$SCRIPT_DIR/patches/x86_64-windows-wine11.4"
-    PATCHES_UNIX="$SCRIPT_DIR/patches/x86_64-unix-wine11.4"
-    ensure_asset "patches/x86_64-windows-wine11.4/mfplat.dll" "$PATCHES_WIN/mfplat.dll"
-    ensure_asset "patches/x86_64-windows-wine11.4/mfreadwrite.dll" "$PATCHES_WIN/mfreadwrite.dll"
-    ensure_asset "patches/x86_64-windows-wine11.4/winegstreamer.dll" "$PATCHES_WIN/winegstreamer.dll"
-    ensure_asset "patches/x86_64-unix-wine11.4/winegstreamer.so" "$PATCHES_UNIX/winegstreamer.so"
-
-    WINE_WIN="$WINE_DIR/lib/wine/x86_64-windows"
-    [[ -d "$WINE_WIN" ]] || WINE_WIN="$WINE_DIR/lib64/wine/x86_64-windows"
-    WINE_UNIX="$WINE_DIR/lib/wine/x86_64-unix"
-    [[ -d "$WINE_UNIX" ]] || WINE_UNIX="$WINE_DIR/lib64/wine/x86_64-unix"
-
-    if [[ -d "$PATCHES_WIN" ]] && [[ -d "$WINE_WIN" ]]; then
-        for dll in mfplat.dll mfreadwrite.dll winegstreamer.dll; do
-            [[ -f "$PATCHES_WIN/$dll" ]] && cp "$PATCHES_WIN/$dll" "$WINE_WIN/$dll" && cp "$PATCHES_WIN/$dll" "$SYS32/$dll"
-        done
-    fi
-    if [[ -d "$PATCHES_UNIX" ]] && [[ -d "$WINE_UNIX" ]] && [[ -f "$PATCHES_UNIX/winegstreamer.so" ]]; then
-        cp "$PATCHES_UNIX/winegstreamer.so" "$WINE_UNIX/winegstreamer.so"
-    fi
-
-    run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfplat" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfplat override"
-    run wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v "mfreadwrite" /t REG_SZ /d "native,builtin" /f || warn "failed to set mfreadwrite override"
-    ok "mfplat + winegstreamer (video export)"
-
+    _install_patches
     install_cjk_font_fix
 fi
 
@@ -740,7 +1408,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
     msg "${BOLD}press enter to launch the CSP installer.${RESET}"
     msg "${DIM}complete the installer as normal.${RESET}"
     gap
-    printf "  ${TEAL}│${RESET}   "
+    printf "  ${TEAL}│${RESET}   " || true
     read -rp "press enter to continue..." </dev/tty
     ok "Clip Studio Paint (dry run)"
 else
@@ -757,7 +1425,7 @@ else
     msg "${BOLD}press enter to launch the CSP installer.${RESET}"
     msg "${DIM}complete the installer as normal.${RESET}"
     gap
-    printf "  ${TEAL}│${RESET}   "
+    printf "  ${TEAL}│${RESET}   " || true
     read -rp "press enter to continue..." </dev/tty
     info "CSP installer running, come back when done..."
     env WINEDEBUG=-all WINEDLLOVERRIDES="winemenubuilder.exe=d" \
@@ -792,103 +1460,35 @@ if [[ $DRY_RUN -eq 1 ]]; then
     ok ".clip thumbnails + MIME type (dry run)"
 else
 
-# --- UPDATED ICON PULL LOGIC ---
-ICON_PATH="$HOME/.local/share/icons/clipstudiopaint_macos.png"
-ICON_STUDIO_PATH="$HOME/.local/share/icons/clipstudio.png"
+# --- APP ICONS ---
+# We pull the icons from the Wikimedea Commons and avoid shipping them in the repo to comply with trademark laws.
+# This way if an icon is missing for some reason we still have a backup icon to use.
+ICON_THEME_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
+ICON_PAINT="$ICON_THEME_DIR/clipstudiopaint.png"
+ICON_STUDIO="$ICON_THEME_DIR/clipstudio.png"
+ICON_URL="https://upload.wikimedia.org/wikipedia/commons/1/14/Clipstudiopaint_app_logo.png"
+mkdir -p "$ICON_THEME_DIR"
 
-# Remote sources for icons
-URL_PAINT_ICON="https://images.icon-icons.com/3053/PNG/512/clip_studio_paint_macos_bigsur_icon_189480.png"
-URL_STUDIO_ICON="https://raw.githubusercontent.com/parka6060/CSPenguin-Installer/main/assets/clipstudio.png"
+_fetch_icon() {
+    local dest="$1"
+    if [[ -f "$dest" ]] && file "$dest" | grep -q 'PNG image'; then
+        ok "icon: $(basename "$dest") (cached)"
+        return
+    fi
+    local tmp="${dest}.part"
+    if wget -q --timeout=30 --tries=3 -O "$tmp" "$ICON_URL" && file "$tmp" | grep -q 'PNG image'; then
+        mv "$tmp" "$dest"
+        ok "icon: $(basename "$dest")"
+    else
+        rm -f "$tmp" 2>/dev/null || true
+        warn "icon download failed: $(basename "$dest")"
+    fi
+}
 
-mkdir -p "$HOME/.local/share/icons"
+_fetch_icon "$ICON_PAINT"
+_fetch_icon "$ICON_STUDIO"
 
-# Pull Paint icon (MacOS Big Sur)[cite: 1]
-if [[ ! -f "$ICON_PATH" ]]; then
-    info "Fetching macOS Paint icon..."
-    wget -q -O "$ICON_PATH" "$URL_PAINT_ICON" || warn "Failed to fetch Paint icon"
-fi
-
-# Pull Studio icon from repo[cite: 1]
-if [[ ! -f "$ICON_STUDIO_PATH" ]]; then
-    info "Fetching standard Studio icon..."
-    wget -q -O "$ICON_STUDIO_PATH" "$URL_STUDIO_ICON" || warn "Failed to fetch Studio icon"
-fi
-# --- END UPDATED LOGIC ---
-
-cat > "$LAUNCH_SCRIPT" << LAUNCHEOF
-#!/usr/bin/env bash
-export PATH="$WINE_DIR/bin:\$PATH"
-export WINESERVER="$WINESERVER_BIN"
-export WINEPREFIX="$WINEPREFIX"
-export WINEDEBUG=-all
-export WINEESYNC=1
-export WINEFSYNC=1
-export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
-export DXVK_ASYNC=1
-export DXVK_STATE_CACHE=1
-export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
-export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
-export mesa_glthread=true
-export __GL_SHADER_DISK_CACHE=1
-export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
-export RADV_PERFTEST=gpl
-export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-background-networking --no-first-run --disable-sync"
-CSP_EXE="$CSP_INSTALL_PATH"
-if [[ -n "\$1" ]] && command -v winepath &>/dev/null; then
-    WIN_PATH="\$(WINEPREFIX="$WINEPREFIX" winepath --windows "\$1")"
-    wine "\$CSP_EXE" "\$WIN_PATH" &
-else
-    wine "\$CSP_EXE" &
-fi
-WINE_PID=\$!
-
-# Strip fullscreen state whenever CSP sets it (Wine maps borderless-maximized to fullscreen).
-if command -v wmctrl &>/dev/null && command -v xprop &>/dev/null; then
-    (
-        while kill -0 "\$WINE_PID" 2>/dev/null; do
-            while IFS= read -r _wid; do
-                _st=\$(xprop -id "\$_wid" _NET_WM_STATE 2>/dev/null)
-                if [[ "\$_st" == *FULLSCREEN* ]]; then
-                    wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
-                    xprop -id "\$_wid" -spy _NET_WM_STATE 2>/dev/null | while IFS= read -r _line; do
-                        [[ "\$_line" == *FULLSCREEN* ]] && wmctrl -ir "\$_wid" -b remove,fullscreen 2>/dev/null || true
-                    done
-                    exit 0
-                fi
-            done < <(xprop -root _NET_CLIENT_LIST 2>/dev/null | tr ',' '\n' | while IFS= read -r _r; do
-                _w=\$(echo "\$_r" | tr -d ' #')
-                [[ \$(xprop -id "0x\$_w" WM_CLASS 2>/dev/null) == *clipstudiopaint* ]] && echo "0x\$_w"
-            done)
-            sleep 0.5
-        done
-    ) &
-fi
-
-wait "\$WINE_PID"
-LAUNCHEOF
-chmod +x "$LAUNCH_SCRIPT"
-
-cat > "$LAUNCHER_STUDIO" << LAUNCHEOF
-#!/usr/bin/env bash
-export PATH="$WINE_DIR/bin:\$PATH"
-export WINESERVER="$WINESERVER_BIN"
-export WINEPREFIX="$WINEPREFIX"
-export WINEDEBUG=-all
-export WINEESYNC=1
-export WINEFSYNC=1
-export WINEDLLPATH="$LAUNCHER_DIR:\${WINEDLLPATH:-}"
-export DXVK_ASYNC=1
-export DXVK_STATE_CACHE=1
-export DXVK_CONFIG_FILE="$WINEPREFIX/dxvk.conf"
-export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
-export mesa_glthread=true
-export __GL_SHADER_DISK_CACHE=1
-export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
-export RADV_PERFTEST=gpl
-export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu"
-exec wine "$STUDIO_EXE"
-LAUNCHEOF
-chmod +x "$LAUNCHER_STUDIO"
+_write_launchers
 ok "launch scripts"
 
 DESKTOP_FILE="$HOME/.local/share/applications/clipstudiopaint.desktop"
@@ -904,7 +1504,7 @@ Type=Application
 Categories=Graphics;
 MimeType=application/x-clip;
 StartupWMClass=clipstudiopaint.exe
-Icon=$ICON_PATH
+Icon=$ICON_PAINT
 EOF
 
 cat > "$DESKTOP_STUDIO" << EOF
@@ -915,7 +1515,7 @@ Terminal=false
 Type=Application
 Categories=Graphics;
 StartupWMClass=clipstudio.exe
-Icon=$ICON_STUDIO_PATH
+Icon=$ICON_STUDIO
 EOF
 
 chmod +x "$DESKTOP_FILE" "$DESKTOP_STUDIO"
@@ -934,54 +1534,91 @@ if [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]]; then
     fi
 
     if [[ -n "$_kwc" ]]; then
-        if ! grep -q "CSPenguin:" "$_kwinrc" 2>/dev/null; then
-            _uuid_below="cspenguin-$(uuidgen 2>/dev/null || echo below-rule)"
+        _write_kwin_subwindow_rule() {
+            local uuid="$1"
+            $_kwc --file kwinrulesrc --group "$uuid" --key Description "CSPenguin: CSP subwindows on top"
+            $_kwc --file kwinrulesrc --group "$uuid" --key below false
+            $_kwc --file kwinrulesrc --group "$uuid" --key belowrule 3
+            $_kwc --file kwinrulesrc --group "$uuid" --key above true
+            $_kwc --file kwinrulesrc --group "$uuid" --key aboverule 3
+            $_kwc --file kwinrulesrc --group "$uuid" --key fsplevel 3
+            $_kwc --file kwinrulesrc --group "$uuid" --key fsplevelrule 2
+            $_kwc --file kwinrulesrc --group "$uuid" --key hastransientparent true
+            $_kwc --file kwinrulesrc --group "$uuid" --key hastransientparentmatch 1
+            $_kwc --file kwinrulesrc --group "$uuid" --key skiptaskbar true
+            $_kwc --file kwinrulesrc --group "$uuid" --key skiptaskbarrule 3
+            $_kwc --file kwinrulesrc --group "$uuid" --key wmclass "clipstudiopaint.exe clipstudiopaint.exe"
+            $_kwc --file kwinrulesrc --group "$uuid" --key wmclasscomplete true
+            $_kwc --file kwinrulesrc --group "$uuid" --key wmclassmatch 1
+        }
 
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key Description "CSPenguin: CSP below for popups"
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key below true
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key belowrule 3
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key fullscreen false
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key fullscreenrule 3
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key wmclass "clipstudiopaint.exe"
-            $_kwc --file kwinrulesrc --group "$_uuid_below" --key wmclassmatch 2
-
-            _existing_rules=$($_krc --file kwinrulesrc --group General --key rules 2>/dev/null || true)
-            _existing_count=$($_krc --file kwinrulesrc --group General --key count 2>/dev/null || echo 0)
-            _new_count=$((_existing_count + 1))
-            if [[ -n "$_existing_rules" ]]; then
-                _new_rules="${_existing_rules},${_uuid_below}"
-            else
-                _new_rules="${_uuid_below}"
+        _register_kwin_rule() {
+            local uuid="$1" rules count
+            rules=$($_krc --file kwinrulesrc --group General --key rules 2>/dev/null || true)
+            count=$($_krc --file kwinrulesrc --group General --key count 2>/dev/null || echo 0)
+            if [[ "$rules" != *"$uuid"* ]]; then
+                local new_rules="${rules:+$rules,}$uuid"
+                $_kwc --file kwinrulesrc --group General --key count "$((count + 1))"
+                $_kwc --file kwinrulesrc --group General --key rules "$new_rules"
             fi
-            $_kwc --file kwinrulesrc --group General --key count "$_new_count"
-            $_kwc --file kwinrulesrc --group General --key rules "$_new_rules"
+        }
 
+        _reload_kwin() {
             qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || \
                 dbus-send --type=method_call --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
-            ok "KDE window rules"
-        else
+        }
+
+        _csp_uuid=""
+        _is_old_rule=0
+        if grep -q "CSPenguin:" "$_kwinrc" 2>/dev/null; then
             _csp_uuid=$(awk -F'[][]' '/^\[/{grp=$2} /CSPenguin:/{print grp; exit}' "$_kwinrc" 2>/dev/null || true)
             if [[ -n "$_csp_uuid" ]]; then
-                _fs_val=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key fullscreen 2>/dev/null || true)
-                if [[ "$_fs_val" != "false" ]]; then
-                    $_kwc --file kwinrulesrc --group "$_csp_uuid" --key fullscreen false
-                    $_kwc --file kwinrulesrc --group "$_csp_uuid" --key fullscreenrule 3
-                    qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || \
-                        dbus-send --type=method_call --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
+                _below_val=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key below 2>/dev/null || true)
+                [[ "$_below_val" == "true" ]] && _is_old_rule=1
+            fi
+        fi
+
+        if [[ -n "$_csp_uuid" ]]; then
+            if [[ $_is_old_rule -eq 1 ]]; then
+                warn "migrating old CSPenguin window rule..."
+                _write_kwin_subwindow_rule "$_csp_uuid"
+                _reload_kwin
+                ok "KDE window rules (migrated)"
+            else
+                _wmclass=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key wmclass 2>/dev/null || true)
+                _wmclasscomplete=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key wmclasscomplete 2>/dev/null || true)
+                _above_val=$($_krc --file kwinrulesrc --group "$_csp_uuid" --key above 2>/dev/null || true)
+
+                if [[ "$_wmclass" != "clipstudiopaint.exe clipstudiopaint.exe" ]] || \
+                   [[ "$_wmclasscomplete" != "true" ]] || \
+                   [[ "$_above_val" != "true" ]]; then
+                    _write_kwin_subwindow_rule "$_csp_uuid"
+                    _reload_kwin
                     ok "KDE window rules (updated)"
                 else
                     ok "KDE window rules (already set)"
                 fi
-            else
-                ok "KDE window rules (already set)"
             fi
+        else
+            _uuid_above="cspenguin-$(uuidgen 2>/dev/null || echo above-rule)"
+            _write_kwin_subwindow_rule "$_uuid_above"
+            _register_kwin_rule "$_uuid_above"
+            _reload_kwin
+            ok "KDE window rules"
         fi
     else
         warn "kwriteconfig not found, set window rules manually"
     fi
+    # rebuild the KDE menu database so updated .desktop entries + icons show up immediately
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        kbuildsycoca6 2>/dev/null || true
+    elif command -v kbuildsycoca5 >/dev/null 2>&1; then
+        kbuildsycoca5 2>/dev/null || true
+    fi
 fi
 
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 THUMBNAILER_SRC="$SCRIPT_DIR/patches/thumbnailer/clip-thumbnailer"
 THUMBNAILER_BIN="$HOME/.local/bin/clip-thumbnailer"
@@ -1042,33 +1679,14 @@ if [[ $UPDATE_ONLY -eq 1 ]] && systemctl --user is-enabled csp-wineserver.servic
     _prewarm="y"
     info "updating existing wineserver service"
 else
-    printf "  ${TEAL}│${RESET}   "
+    printf "  ${TEAL}│${RESET}   " || true
     read -rp "enable wineserver pre-warm? [Y/n] " _prewarm </dev/tty
 fi
 if [[ "${_prewarm,,}" != "n" ]]; then
     if [[ $DRY_RUN -eq 1 ]]; then
         ok "wineserver service (dry run)"
     else
-        mkdir -p "$HOME/.config/systemd/user"
-        cat > "$HOME/.config/systemd/user/csp-wineserver.service" << EOF
-[Unit]
-Description=Wine server pre-warm for CSP
-After=default.target
-
-[Service]
-Type=simple
-Environment=PATH=$WINE_DIR/bin:/usr/bin
-Environment=WINEPREFIX=$WINEPREFIX
-Environment=WINESERVER=$WINESERVER_BIN
-Environment=WINEDEBUG=-all
-ExecStartPre=-$WINESERVER_BIN -k
-ExecStart=$WINESERVER_BIN -f -p
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=default.target
-EOF
+        _write_prewarm_service
         if systemctl --user daemon-reload 2>/dev/null && systemctl --user enable --now csp-wineserver.service 2>/dev/null; then
             ok "wineserver service enabled"
         else
@@ -1099,6 +1717,9 @@ fi
 echo -e "  ${AMBER}tips${RESET}"
 echo -e "    ${DIM}pen pressure${RESET}  Preferences > Tablet > mouse mode"
 echo -e "    ${DIM}hidpi${RESET}         winecfg > Graphics > DPI"
+echo -e "    ${DIM}thumbnails${RESET}    enable in file manager preview settings"
+echo -e "                   (Dolphin: Configure Dolphin > Interface > Previews"
+echo -e "                    > tick \"Clip Studio Paint File\", then restart Dolphin)"
 echo ""
 echo -e "  ${DIM}something not working? open an issue at${RESET}"
 echo -e "  ${DIM}https://github.com/parka6060/CSPenguin-Installer${RESET}"
