@@ -53,13 +53,13 @@ This requires Wine and CSP to already be installed.
 
 ## Updating Wine
 
-To upgrade the bundled Wine without reinstalling CSP:
+To install or repair the supported bundled Wine runtime without reinstalling CSP:
 
 ```bash
 ./install.sh --update-wine
 ```
 
-_Note: this will only update wine to newer versions that have already been tested for compatibility by the maintainers of this install script. If you wish to install an newer, unverified wine version, please do so manually._
+_Note: this installs the exact Wine version tested together with its matching patches. It does not automatically select the latest upstream Wine release._
 
 or
 
@@ -67,7 +67,6 @@ or
 curl -fsSL https://raw.githubusercontent.com/parka6060/CSPenguin-Installer/main/install.sh | bash -s -- --update-wine
 ```
 
-This downloads the new Wine, applies the available patches, and updates the launcher scripts — your Wine prefix, CSP install, and settings are preserved.
 
 ## Updating KWin Rules
 
@@ -112,7 +111,7 @@ Find the installed version with `ls ~/.local/share/cspenguin/wine-*/`.
 ## Known issues
 
 - Timelapse should work 100%, but animation export at non-default framerates could break encoding; not thoroughly tested.
-- The timelapse patch DLLs may not be available for every Wine version. If they're missing, `--update-wine` will select the closest available version.
+- Wine updates require an exact matching timelapse patch set; newer upstream Wine releases are not selected automatically.
 - The installer can take a while, especially if downloading dotnet files.
 
 ## Support

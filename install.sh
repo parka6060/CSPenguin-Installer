@@ -95,7 +95,7 @@ fi
 WINEPREFIX="${WINEPREFIX:-$HOME/.wine-csp}"
 WINEARCH=win64
 
-WINE_VERSION="11.15"
+WINE_VERSION="11.4"
 WINE_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
 FREETYPE_VERSION="2.13.2"
 FREETYPE_URL="https://archive.archlinux.org/packages/f/freetype2/freetype2-${FREETYPE_VERSION}-1-x86_64.pkg.tar.zst"
@@ -498,26 +498,6 @@ _latest_kron4ek_wine() {
 }
 
 # ============================================================
-# find the closest available patch version numerically
-# ============================================================
-_closest_patch_version() {
-    local _target="${1//./}"
-    local _best="" _best_dist=999999
-    for _pd in "$SCRIPT_DIR"/patches/x86_64-windows-wine*; do
-        [[ -d "$_pd" ]] || continue
-        [[ -f "$_pd/mfplat.dll" ]] || continue
-        _ver="${_pd##*wine}"
-        _ver="${_ver//./}"
-        _dist=$(( _target > _ver ? _target - _ver : _ver - _target ))
-        if (( _dist < _best_dist )); then
-            _best="$_pd"
-            _best_dist=$_dist
-        fi
-    done
-    echo "$_best"
-}
-
-# ============================================================
 # fetch a patch file from local or remote
 # ============================================================
 _try_fetch_patch() {
@@ -818,19 +798,14 @@ _install_patches() {
             local _ufallback="$DOWNLOAD_DIR/patches/x86_64-unix-wine${WINE_VERSION}"
             _try_fetch_patch "$_ufallback" "patches/x86_64-unix-wine${WINE_VERSION}" "winegstreamer.so" || true
             _patches_unix="$_ufallback"
-        else
-            local _closest
-            _closest=$(_closest_patch_version "$WINE_VERSION")
-            if [[ -n "$_closest" ]]; then
-                _patches_win="$_closest"
-                _patches_unix="${_closest/x86_64-windows/x86_64-unix}"
-                warn "no patches for Wine ${WINE_VERSION}, using $(basename "$_patches_win")"
-            fi
         fi
     fi
 
     local _ok=0
-    if [[ -d "$_patches_win" ]] && [[ -f "$_patches_win/mfplat.dll" ]]; then
+    if [[ -f "$_patches_win/mfplat.dll" ]] &&
+       [[ -f "$_patches_win/mfreadwrite.dll" ]] &&
+       [[ -f "$_patches_win/winegstreamer.dll" ]] &&
+       [[ -f "$_patches_unix/winegstreamer.so" ]]; then
         mkdir -p "$SYS32"
         local _wine_win="$WINE_DIR/lib/wine/x86_64-windows"
         [[ -d "$_wine_win" ]] || _wine_win="$WINE_DIR/lib64/wine/x86_64-windows"
@@ -866,7 +841,7 @@ REGEOF
         fi
         ok "patches applied: video export"
     else
-        warn "patches not available for Wine ${WINE_VERSION}, video export or rotated/circular text may not work"
+        warn "exact patches not available for Wine ${WINE_VERSION}; video export may not work"
     fi
 }
 
@@ -877,7 +852,7 @@ if [[ $UPDATE_ONLY -eq 0 ]] && [[ $UPDATE_WINE -eq 0 ]] && [[ -f "$LAUNCH_SCRIPT
     echo -e "  ${YELLOW}${BOLD}existing CSPenguin install found${RESET} ${DIM}(Wine $_found_wine, $LAUNCHER_DIR)${RESET}"
     echo ""
     echo "    1) update       - regenerate launch scripts/config only; keeps your CSP install and Wine version as-is (fast)"
-    echo "    2) update wine  - like update, but also upgrades the bundled Wine to the latest release"
+    echo "    2) update wine  - install or repair the supported bundled Wine runtime"
     echo "    3) reinstall    - wipe and do a full fresh install"
     echo "    4) cancel"
     echo ""
@@ -915,7 +890,7 @@ if [[ $UPDATE_ONLY -eq 1 || $UPDATE_WINE -eq 1 ]] && [[ ! -f "$LAUNCH_SCRIPT" ]]
 fi
 
 # ============================================================
-# --update-wine / -w : upgrade Wine without reinstalling CSP
+# --update-wine / -w : install the supported Wine runtime without reinstalling CSP
 # ============================================================
 if [[ $UPDATE_WINE -eq 1 ]]; then
     echo ""
@@ -969,7 +944,7 @@ if [[ $UPDATE_WINE -eq 1 ]]; then
             ok "upgrading Wine $_current_wine -> $WINE_VERSION"
         fi
 
-        # download new Wine
+        # download the supported Wine build
         _wine_url="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VERSION}/wine-${WINE_VERSION}-amd64.tar.xz"
         _wine_tar="$DOWNLOAD_DIR/wine-${WINE_VERSION}-amd64.tar.xz"
         mkdir -p "$DOWNLOAD_DIR"
