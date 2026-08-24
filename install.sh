@@ -877,6 +877,149 @@ REGEOF
     fi
 }
 
+# Keep CLIP STUDIO cloud downloads on the Linux side of the Wine prefix.
+# This applies the reported workaround for save/export failures while
+# preserving the Windows path CSP expects.
+_configure_cloud_downloads() {
+    local _wine_user _wine_user_dir _candidate _source _possible_source
+    local _documents_dir _target _source_has_files=0 _target_has_files=0
+    local _answer="" _target_was_present=0 _link_target=""
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        ok "cloud downloads symlink (dry run)"
+        return 0
+    fi
+
+    _wine_user="${USER:-$(id -un)}"
+    _wine_user_dir="$WINEPREFIX/drive_c/users/$_wine_user"
+    _source=""
+
+    # Prefer an existing CSP download location, including one created under a
+    # different Wine username by an older prefix.
+    for _candidate in "$_wine_user_dir" "$WINEPREFIX/drive_c/users"/*; do
+        [[ -d "$_candidate" ]] || continue
+        _possible_source="$_candidate/AppData/Roaming/CELSYSUserData/CELSYS/CLIPStudioCommon/Document/DocumentDownload"
+        if [[ -e "$_possible_source" ]] || [[ -L "$_possible_source" ]]; then
+            _wine_user_dir="$_candidate"
+            _source="$_possible_source"
+            break
+        fi
+    done
+
+    # With no existing download folder, Wine normally names its user directory
+    # after the Linux user. Fall back to a directory containing CSP data when
+    # an older prefix used a different name.
+    if [[ -z "$_source" ]] && [[ ! -d "$_wine_user_dir" ]]; then
+        for _candidate in "$WINEPREFIX/drive_c/users"/*; do
+            [[ -d "$_candidate/AppData/Roaming/CELSYSUserData" ]] || continue
+            _wine_user_dir="$_candidate"
+            break
+        done
+    fi
+
+    if [[ ! -d "$_wine_user_dir" ]]; then
+        warn "could not locate the Wine user directory; cloud downloads unchanged"
+        return 0
+    fi
+
+    [[ -n "$_source" ]] || _source="$_wine_user_dir/AppData/Roaming/CELSYSUserData/CELSYS/CLIPStudioCommon/Document/DocumentDownload"
+
+    _documents_dir=""
+    if command -v xdg-user-dir >/dev/null 2>&1; then
+        _documents_dir=$(xdg-user-dir DOCUMENTS 2>/dev/null || true)
+    fi
+    [[ "$_documents_dir" == /* ]] || _documents_dir="$HOME/Documents"
+    _target="$_documents_dir/Clip Studio Paint/Cloud Downloads"
+
+    if [[ -L "$_source" ]]; then
+        _link_target=$(readlink "$_source" 2>/dev/null || true)
+        if [[ "$_link_target" == "$_target" ]]; then
+            if mkdir -p "$_target"; then
+                ok "cloud downloads linked to $_target"
+            else
+                warn "cloud downloads symlink target is unavailable: $_target"
+            fi
+        else
+            info "custom cloud downloads symlink already exists; leaving it unchanged"
+        fi
+        return 0
+    fi
+
+    if [[ -e "$_source" ]] && [[ ! -d "$_source" ]]; then
+        warn "cloud download path is not a directory; leaving it unchanged"
+        return 0
+    fi
+    if [[ -e "$_target" ]] && [[ ! -d "$_target" ]]; then
+        warn "cloud download destination is not a directory; leaving it unchanged"
+        return 0
+    fi
+
+    [[ -d "$_source" ]] && [[ -n "$(find "$_source" -mindepth 1 -print -quit 2>/dev/null)" ]] && _source_has_files=1
+    [[ -d "$_target" ]] && [[ -n "$(find "$_target" -mindepth 1 -print -quit 2>/dev/null)" ]] && _target_has_files=1
+
+    if [[ $_source_has_files -eq 1 && $_target_has_files -eq 1 ]]; then
+        warn "cloud downloads exist in both locations; leaving them unchanged"
+        info "Wine folder:  $_source"
+        info "Linux folder: $_target"
+        return 0
+    fi
+
+    if [[ $_source_has_files -eq 1 ]]; then
+        if pgrep -u "$(id -u)" -fi 'CLIPStudio(Paint)?' >/dev/null 2>&1; then
+            warn "CLIP STUDIO appears to be running; cloud downloads unchanged"
+            info "close CLIP STUDIO and run --update to try again"
+            return 0
+        fi
+
+        echo ""
+        info "existing CLIP STUDIO cloud downloads found"
+        info "move them to: $_target"
+        read -rp "  move existing cloud downloads? [y/N] " _answer </dev/tty || true
+        if [[ ! "$_answer" =~ ^[Yy]$ ]]; then
+            info "cloud downloads unchanged"
+            return 0
+        fi
+    fi
+
+    mkdir -p "$(dirname "$_source")" "$(dirname "$_target")"
+
+    if [[ -d "$_target" ]]; then
+        _target_was_present=1
+        if ! rmdir "$_target" 2>/dev/null; then
+            # A non-empty target is safe only when the source is empty/missing;
+            # in that case we simply link CSP to the existing Linux folder.
+            if [[ $_source_has_files -eq 1 ]]; then
+                warn "cloud download destination is not empty; leaving files unchanged"
+                return 0
+            fi
+        fi
+    fi
+
+    if [[ $_source_has_files -eq 1 ]]; then
+        if ! mv -T -- "$_source" "$_target"; then
+            [[ $_target_was_present -eq 1 ]] && mkdir -p "$_target"
+            warn "could not move cloud downloads; original files left unchanged"
+            return 0
+        fi
+    else
+        [[ -d "$_source" ]] && rmdir "$_source" 2>/dev/null || true
+        mkdir -p "$_target"
+    fi
+
+    if ! ln -s "$_target" "$_source"; then
+        if [[ $_source_has_files -eq 1 ]] && [[ -d "$_target" ]]; then
+            mv -T -- "$_target" "$_source" 2>/dev/null || true
+            [[ $_target_was_present -eq 1 ]] && mkdir -p "$_target"
+        else
+            mkdir -p "$_source"
+        fi
+        warn "could not create cloud downloads symlink; changes rolled back"
+        return 0
+    fi
+
+    ok "cloud downloads linked to $_target"
+}
+
 # existing install found and no mode flag given -- ask what to do
 if [[ $UPDATE_ONLY -eq 0 ]] && [[ $UPDATE_WINE -eq 0 ]] && [[ -f "$LAUNCH_SCRIPT" ]]; then
     _found_wine=$(_detect_installed_wine || echo "unknown")
@@ -1023,6 +1166,7 @@ if [[ $UPDATE_WINE -eq 1 ]]; then
 
         _install_patches
 
+        _configure_cloud_downloads
         _write_launchers
         info "launcher scripts regenerated"
 
@@ -1661,6 +1805,10 @@ THUMBEOF
 fi
 
 fi
+
+# Store cloud-downloaded documents outside Wine's C: drive while keeping the
+# path CSP expects. Existing downloads require confirmation before being moved.
+_configure_cloud_downloads
 
 # [7/7] finishing up
 

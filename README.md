@@ -92,6 +92,7 @@ This will migrate any old rules previous versions created and apply the current 
 10. `.clip` file association so double-clicking opens CSP
 11. KDE window rules (KDE only) so ribbon bar dropdowns appear on top of CSP instead of behind it. If this doesn't apply properly you can right click your CSP icon in your taskbar or set up window rules yourself!
 12. A wineserver pre-warm service so CSP launches a bit faster
+13. A Linux-side cloud downloads folder, linked into the Wine prefix as a workaround for saving and exporting cloud-downloaded files
 
 > **Note:** `.clip` file thumbnails need to be **enabled in your file manager's preview settings** — on Dolphin/KDE, open _Configure Dolphin → Interface → Previews_ and tick the "Clip Studio Paint File" entry (after running the installer, restart your file manager).
 
