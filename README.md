@@ -116,7 +116,11 @@ Find the installed version with `ls ~/.local/share/cspenguin/wine-*/`.
 
 ## Support
 
-If you have problems please first check the issues tab and see if there's an existing solution, if not, then please submit an issue with all the information you have so it can be investigated.
+Before opening an issue, please search the existing issues and run debug.sh. Include its output along with your distribution, desktop environment, GPU, and what you were doing when the problem occurred.
+
+I (eninabox) maintain this project on a best-effort basis. I'm not actively developing new features or able to investigate every system specific problem, but I'll still help when the answer is clear, review contributions, and update the supported Wine ver when it brings significant improvements to CSP.
+
+There are also some lovely people who have contributed to answering questions and may be able to help when I can't. Pull requests, community-tested fixes, and people helping each other in the issues are always very welcome!
 
 ## Uninstall
 
