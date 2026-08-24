@@ -789,6 +789,8 @@ LAUNCHEOF
 
 _write_prewarm_service() {
     mkdir -p "$HOME/.config/systemd/user"
+    # Escape the loop variable so it is expanded by the generated service,
+    # not by this installer heredoc (which runs with nounset enabled).
     cat > "$HOME/.config/systemd/user/csp-wineserver.service" << EOF
 [Unit]
 Description=Wine server pre-warm for CSP
@@ -801,7 +803,7 @@ Environment=WINEPREFIX=$WINEPREFIX
 Environment=WINESERVER=$WINESERVER_BIN
 Environment=WINEDEBUG=-all
 ExecStartPre=-$WINESERVER_BIN -k
-ExecStartPre=-/usr/bin/bash -c 'for d in "$WINEPREFIX/drive_c/users/$(whoami)/Documents/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Roaming/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Local/CELSYS"; do [ -d "$d" ] && find "$d" -name "*.sqlite" -o -name "*.db" | while read f; do cat "$f" > /dev/null 2>&1 & done; done; wait'
+ExecStartPre=-/usr/bin/bash -c 'for d in "$WINEPREFIX/drive_c/users/$(whoami)/Documents/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Roaming/CELSYS" "$WINEPREFIX/drive_c/users/$(whoami)/AppData/Local/CELSYS"; do [ -d "\$d" ] && find "\$d" -type f \( -name "*.sqlite" -o -name "*.db" \) -exec cat {} + > /dev/null 2>&1; done'
 ExecStart=$WINESERVER_BIN -f -p
 Restart=always
 RestartSec=5s
