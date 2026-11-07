@@ -92,6 +92,7 @@ This will migrate any old rules previous versions created and apply the current 
 10. `.clip` file association so double-clicking opens CSP
 11. KDE window rules (KDE only) so ribbon bar dropdowns appear on top of CSP instead of behind it. If this doesn't apply properly you can right click your CSP icon in your taskbar or set up window rules yourself!
 12. A wineserver pre-warm service so CSP launches a bit faster
+13. Patched `winex11.so` / `win32u.so` so menus open right under the menu bar and maximize works on window managers such as COSMIC (see below)
 
 > **Note:** `.clip` file thumbnails need to be **enabled in your file manager's preview settings** — on Dolphin/KDE, open _Configure Dolphin → Interface → Previews_ and tick the "Clip Studio Paint File" entry (after running the installer, restart your file manager).
 
@@ -108,11 +109,46 @@ winetricks <package>
 
 Find the installed version with `ls ~/.local/share/cspenguin/wine-*/`.
 
+## Window placement patches (winex11, win32u)
+
+On some window managers, notably COSMIC, stock Wine misplaces CSP's windows:
+
+- **Menus and tooltips** pop up far from the menu bar or the hovered button, even on another monitor.
+  CSP draws its menus as borderless popups owned by small helper windows; stock Wine hands them to
+  the window manager as transient dialogs, which it then places on its own. Tooltips end up the same
+  way because they are created with a caption and only become borderless popups before being shown.
+- **Maximize** snaps back right away. CSP draws its own frame and expects a maximized window to
+  cover the work area plus a frame that lies off screen, like on Windows. The window manager
+  maximizes the host window to the work area instead, the size change is reported back, and CSP
+  restores itself.
+
+The installer replaces the bundled `winex11.so` and `win32u.so` (always together) with versions
+that:
+
+- keep owned borderless popups (menus, tooltips, dropdowns) unmanaged, so Wine positions them itself,
+  and decide whether a window is managed only once it is shown (a window can't be made unmanaged
+  again). The main window stays managed, so focus, keyboard shortcuts and Alt+Tab keep working.
+- keep the off screen frame of a maximized window that draws its own frame out of the host window,
+  so the host window matches the rect the window manager maximizes it to.
+- don't send position requests or ask for window manager decorations while such a window is maximized.
+
+COSMIC also doesn't publish its work area (the screen minus panels) to X11, so Wine would assume the
+whole monitor is usable. On COSMIC the launchers run `cspenguin-workarea.sh`, which maximizes an
+invisible dummy window once to measure the panels and publishes the result as `_GTK_WORKAREAS_D0`
+(needs `python3`; it does nothing when the window manager publishes `_NET_WORKAREA` itself).
+
+- Sources: [`patches/winex11-unmanaged-owned-popups.patch`](patches/winex11-unmanaged-owned-popups.patch), [`patches/winex11-maximize-own-frame.patch`](patches/winex11-maximize-own-frame.patch) and [`patches/win32u-clip-maximized-frame.patch`](patches/win32u-clip-maximized-frame.patch) against the official Wine source; work area helper in [`patches/workarea/`](patches/workarea/)
+- Build: `patches/build-wine-unix-patches.sh [WINE_VERSION]` rebuilds both libraries reproducibly in an AlmaLinux 8 container (podman or docker, glibc 2.28)
+- To fall back to stock behaviour for one run: `CSPENGUIN_MANAGED_POPUPS=1` (menus), `CSPENGUIN_CLIP_MAXIMIZED=0` (maximize), `CSPENGUIN_WORKAREA=0` (skip the work area helper)
+- To revert completely, copy `winex11.so.orig` and `win32u.so.orig` back over `winex11.so` and `win32u.so` in `~/.local/share/cspenguin/wine-<VERSION>/lib/wine/x86_64-unix/`
+- License: the shipped `winex11.so` and `win32u.so` are modified parts of Wine, licensed under the LGPL-2.1-or-later. Their corresponding source is the official `wine-<VERSION>` tarball from dl.winehq.org plus the patches above, and `build-wine-unix-patches.sh` reproduces the binaries.
+
 ## Known issues
 
 - Timelapse should work 100%, but animation export at non-default framerates could break encoding; not thoroughly tested.
 - Wine updates require an exact matching timelapse patch set; newer upstream Wine releases are not selected automatically.
 - The installer can take a while, especially if downloading dotnet files.
+- On COSMIC, maximizing CSP with the window manager's keyboard shortcut (instead of CSP's maximize button) can leave a thin white border along the top and left edges.
 
 ## Support
 

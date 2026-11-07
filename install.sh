@@ -727,6 +727,10 @@ for _MATS_DIR in "\$_CSP_USER/Documents/CELSYS" "\$_CSP_USER/AppData/Roaming/CEL
 done
 wait
 
+# COSMIC doesn't publish its work area (panels) to X11; measure and publish it so a
+# maximized CSP fits between the panels instead of restoring itself
+[[ -x "$LAUNCHER_DIR/cspenguin-workarea.sh" ]] && "$LAUNCHER_DIR/cspenguin-workarea.sh"
+
 if [[ -n "\$1" ]] && command -v winepath &>/dev/null; then
     WIN_PATH="\$(WINEPREFIX="$WINEPREFIX" winepath --windows "\$1")"
     wine "\$CSP_EXE" "\$WIN_PATH" &
@@ -782,6 +786,7 @@ export __GL_SHADER_DISK_CACHE=1
 export __GL_SHADER_DISK_CACHE_PATH="$WINEPREFIX"
 export RADV_PERFTEST=gpl
 export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --disable-gpu-compositing --disable-gpu-vsync --in-process-gpu --disable-renderer-accessibility --disable-extensions --disable-component-extensions-with-background-pages --disk-cache-size=33554432 --disable-features=msEdgeSidebar"
+[[ -x "$LAUNCHER_DIR/cspenguin-workarea.sh" ]] && "$LAUNCHER_DIR/cspenguin-workarea.sh"
 exec wine "$STUDIO_EXE"
 LAUNCHEOF
     chmod +x "$LAUNCHER_STUDIO"
@@ -874,6 +879,108 @@ REGEOF
         ok "patches applied: video export"
     else
         warn "exact patches not available for Wine ${WINE_VERSION}; video export may not work"
+    fi
+
+    _install_wine_unix_patches
+}
+
+# patched Wine unix libraries for window placement on window managers such as COSMIC:
+# - winex11.so: menus open under the menu bar (owned borderless popups stay unmanaged),
+#   and windows that draw their own frame (CSP) can be maximized
+# - win32u.so: keeps the off screen frame of a maximized window out of the host window
+# sources: patches/winex11-*.patch, patches/win32u-*.patch, built by
+# patches/build-wine-unix-patches.sh. Installed together or not at all.
+# Also installs the work area helper the launchers call (patches/workarea/).
+_install_wine_unix_patches() {
+    local _rel="patches/x86_64-unix-wine${WINE_VERSION}" _libs=(winex11.so win32u.so) _lib
+    local _dir="$SCRIPT_DIR/$_rel"
+    for _lib in "${_libs[@]}"; do
+        [[ -f "$_dir/$_lib" ]] && continue
+        _dir="$DOWNLOAD_DIR/$_rel"
+        break
+    done
+    for _lib in "${_libs[@]}"; do
+        if [[ ! -f "$_dir/$_lib" ]] && ! _try_fetch_patch "$_dir" "$_rel" "$_lib"; then
+            info "no patched ${_libs[*]} for Wine ${WINE_VERSION}; menus and maximize may misbehave on some window managers"
+            return 0
+        fi
+    done
+
+    local _wine_unix="$WINE_DIR/lib/wine/x86_64-unix"
+    [[ -d "$_wine_unix" ]] || _wine_unix="$WINE_DIR/lib64/wine/x86_64-unix"
+    for _lib in "${_libs[@]}"; do
+        if [[ ! -f "$_wine_unix/$_lib" ]]; then
+            warn "$_lib not found in $_wine_unix; skipping window placement patches"
+            return 0
+        fi
+    done
+
+    _install_workarea_helper
+
+    local _changed=0
+    for _lib in "${_libs[@]}"; do
+        cmp -s "$_dir/$_lib" "$_wine_unix/$_lib" || _changed=1
+    done
+    if [[ $_changed -eq 0 ]]; then
+        ok "patches applied: window placement (already installed)"
+        return 0
+    fi
+    if [[ $DRY_RUN -eq 1 ]]; then
+        ok "patches applied: window placement (dry run)"
+        return 0
+    fi
+
+    for _lib in "${_libs[@]}"; do
+        # keep the stock library once, so the patches can be reverted by hand
+        [[ -f "$_wine_unix/$_lib.orig" ]] || cp -p "$_wine_unix/$_lib" "$_wine_unix/$_lib.orig"
+        if ! cp -f "$_dir/$_lib" "$_wine_unix/$_lib"; then
+            warn "failed to install patched $_lib; restoring the stock libraries"
+            for _lib in "${_libs[@]}"; do
+                [[ -f "$_wine_unix/$_lib.orig" ]] && cp -f "$_wine_unix/$_lib.orig" "$_wine_unix/$_lib"
+            done
+            return 0
+        fi
+    done
+    # running Wine processes (explorer.exe etc.) still hold the old libraries
+    _restart_wineserver
+    ok "patches applied: window placement (winex11, win32u)"
+}
+
+# work area helper for COSMIC, which doesn't publish its panels to X11
+_install_workarea_helper() {
+    local _f _src
+    [[ $DRY_RUN -eq 1 ]] && return 0
+    for _f in cspenguin-workarea.sh cspenguin-workarea.py; do
+        _src="$SCRIPT_DIR/patches/workarea/$_f"
+        if [[ ! -f "$_src" ]]; then
+            _src="$DOWNLOAD_DIR/patches/workarea/$_f"
+            _try_fetch_patch "$DOWNLOAD_DIR/patches/workarea" "patches/workarea" "$_f" || continue
+        fi
+        mkdir -p "$LAUNCHER_DIR"
+        install -m 755 "$_src" "$LAUNCHER_DIR/$_f" || warn "failed to install $_f"
+    done
+}
+
+# Restart the wineserver so every Wine process reloads its libraries. The pre-warm
+# service kills any running wineserver when it (re)starts, so restart it synchronously
+# instead of killing the server underneath it.
+_restart_wineserver() {
+    if systemctl --user is-active --quiet csp-wineserver.service 2>/dev/null; then
+        systemctl --user restart csp-wineserver.service 2>/dev/null || true
+        # systemctl returns before the server listens; a Wine process started before that
+        # spawns a second server, the service fails, and its restart kills that process
+        local _ids _socket _i
+        if _ids=$(stat -c '%d %i' "$WINEPREFIX" 2>/dev/null); then
+            # shellcheck disable=SC2086
+            _socket="/tmp/.wine-$(id -u)/server-$(printf '%x-%x' $_ids)/socket"
+            for _i in $(seq 100); do
+                [[ -S "$_socket" ]] && systemctl --user is-active --quiet csp-wineserver.service && break
+                sleep 0.1
+            done
+        fi
+    else
+        "$WINESERVER_BIN" -k 2>/dev/null || true
+        "$WINESERVER_BIN" -w 2>/dev/null || true
     fi
 }
 
@@ -1082,6 +1189,7 @@ DXVKEOF
     install_cjk_font_fix
     _bundle_freetype
     _install_gecko
+    _install_wine_unix_patches
 
     # fall through to step 6 and step 7, heh 6 7 >:D
 fi

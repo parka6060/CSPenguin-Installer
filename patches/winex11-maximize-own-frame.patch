@@ -1,0 +1,36 @@
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -527,6 +527,18 @@
+ static unsigned long get_mwm_decorations( struct x11drv_win_data *data, DWORD style, DWORD ex_style )
+ {
+     if (EqualRect( &data->rects.window, &data->rects.visible )) return 0;
++    /* CSPenguin: win32u clips the off screen frame out of the visible rect of maximized
++     * windows that draw their own frame. That leaves the same margin on every side,
++     * while window manager decorations always include a caption at the top. */
++    if ((style & (WS_MAXIMIZE | WS_MINIMIZE)) == WS_MAXIMIZE)
++    {
++        const RECT *window = &data->rects.window, *visible = &data->rects.visible;
++        int margin = visible->left - window->left;
++
++        if (margin > 0 && visible->top - window->top == margin &&
++            window->right - visible->right == margin && window->bottom - visible->bottom == margin)
++            return 0;
++    }
+     return get_mwm_decorations_for_style( style, ex_style );
+ }
+ 
+@@ -3321,7 +3333,13 @@
+     }
+ 
+     /* don't change position if we are about to minimize or maximize a managed window */
+-    if (!(data->managed && (swp_flags & SWP_STATECHANGED) && (new_style & (WS_MINIMIZE|WS_MAXIMIZE))))
++    if (!(data->managed && (swp_flags & SWP_STATECHANGED) && (new_style & (WS_MINIMIZE|WS_MAXIMIZE))) &&
++        /* CSPenguin: nor while the window manager keeps it maximized. Applications that
++         * draw their own frame update it right after maximizing, and a position request
++         * racing with the maximize makes the window manager report an intermediate rect
++         * that these applications take as a reason to restore the window. */
++        !(data->managed && (new_style & (WS_MINIMIZE|WS_MAXIMIZE)) == WS_MAXIMIZE &&
++          (data->desired_state.net_wm_state & (1 << NET_WM_STATE_MAXIMIZED))))
+     {
+         sync_window_position( data, swp_flags, &old_rects );
+ #ifdef HAVE_LIBXSHAPE

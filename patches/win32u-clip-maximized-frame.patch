@@ -1,0 +1,53 @@
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -2004,8 +2004,50 @@
+ }
+ 
+ 
++/* CSPenguin: the frame of a maximized window lies outside of the work area. When the
++ * window manager doesn't decorate the window (the application draws its own frame),
++ * keep that frame out of the visible rect, like Windows does. The host window then
++ * matches the rect the window manager maximizes it to, instead of being resized by
++ * it, which makes applications that draw their own caption restore themselves. */
++static RECT clip_maximized_visible_rect( HWND hwnd, UINT style, const RECT *visible_rect )
++{
++    static int enabled = -1;
++    MONITORINFO info;
++    RECT rect;
++
++    if ((style & (WS_MAXIMIZE | WS_MINIMIZE | WS_CHILD)) != WS_MAXIMIZE) return *visible_rect;
++    if (!(style & (WS_THICKFRAME | WS_DLGFRAME))) return *visible_rect;
++    if (enabled == -1)
++    {
++        const char *env = getenv( "CSPENGUIN_CLIP_MAXIMIZED" );
++        enabled = !(env && *env == '0');
++    }
++    if (!enabled) return *visible_rect;
++
++    info = monitor_info_from_rect( *visible_rect, get_thread_dpi() );
++    if (!info.cbSize) return *visible_rect;
++    /* only when the frame actually lies off screen */
++    if (visible_rect->left >= info.rcWork.left || visible_rect->right <= info.rcWork.right) return *visible_rect;
++    if (!intersect_rect( &rect, visible_rect, &info.rcWork )) return *visible_rect;
++
++    TRACE( "hwnd %p, maximized visible rect %s clipped to %s\n", hwnd,
++           wine_dbgstr_rect( visible_rect ), wine_dbgstr_rect( &rect ) );
++    return rect;
++}
++
++static RECT get_visible_rect_unclipped( HWND hwnd, BOOL shaped, UINT style, UINT ex_style, const struct window_rects *rects );
++
+ static RECT get_visible_rect( HWND hwnd, BOOL shaped, UINT style, UINT ex_style, const struct window_rects *rects )
+ {
++    RECT rect, visible_rect = get_visible_rect_unclipped( hwnd, shaped, style, ex_style, rects );
++
++    if (get_present_rect( hwnd, &rect, get_thread_dpi() )) return visible_rect;
++    if (!EqualRect( &visible_rect, &rects->window )) return visible_rect; /* decorated by the window manager */
++    return clip_maximized_visible_rect( hwnd, style, &visible_rect );
++}
++
++static RECT get_visible_rect_unclipped( HWND hwnd, BOOL shaped, UINT style, UINT ex_style, const struct window_rects *rects )
++{
+     UINT dpi = get_dpi_for_window( hwnd ), style_mask, ex_style_mask;
+     RECT visible_rect, rect = {0};
+ 
