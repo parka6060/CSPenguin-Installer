@@ -877,6 +877,27 @@ REGEOF
     fi
 }
 
+# dwrite.dll that keeps the system font collection in memory. CSP asks for the collection on every font lookup while it
+# starts, and stock Wine rebuilds it from every installed font each time (~30s with ~1000 fonts). Wine always loads this
+# DLL from its own directory, so it is only copied there. Source: patches/dwrite/
+_install_dwrite_patch() {
+    local _patches_win="$SCRIPT_DIR/patches/x86_64-windows-wine${WINE_VERSION}"
+    if [[ ! -f "$_patches_win/dwrite.dll" ]]; then
+        local _fallback="$DOWNLOAD_DIR/patches/x86_64-windows-wine${WINE_VERSION}"
+        _try_fetch_patch "$_fallback" "patches/x86_64-windows-wine${WINE_VERSION}" "dwrite.dll" && _patches_win="$_fallback"
+    fi
+    local _wine_win="$WINE_DIR/lib/wine/x86_64-windows"
+    [[ -d "$_wine_win" ]] || _wine_win="$WINE_DIR/lib64/wine/x86_64-windows"
+
+    if [[ -f "$_patches_win/dwrite.dll" ]] && [[ -f "$_wine_win/dwrite.dll" ]]; then
+        [[ -f "$_wine_win/dwrite.dll.orig" ]] || cp "$_wine_win/dwrite.dll" "$_wine_win/dwrite.dll.orig"
+        cp "$_patches_win/dwrite.dll" "$_wine_win/dwrite.dll"
+        ok "patches applied: font loading at startup"
+    else
+        warn "no dwrite patch for Wine ${WINE_VERSION}; CSP may take longer to start with many fonts installed"
+    fi
+}
+
 # existing install found and no mode flag given -- ask what to do
 if [[ $UPDATE_ONLY -eq 0 ]] && [[ $UPDATE_WINE -eq 0 ]] && [[ -f "$LAUNCH_SCRIPT" ]]; then
     _found_wine=$(_detect_installed_wine || echo "unknown")
@@ -1022,6 +1043,7 @@ if [[ $UPDATE_WINE -eq 1 ]]; then
         ok "dcomp.dll (login/store panels)"
 
         _install_patches
+        _install_dwrite_patch
 
         _write_launchers
         info "launcher scripts regenerated"
@@ -1397,6 +1419,7 @@ else
     ok "dcomp.dll (login/store panels)"
 
     _install_patches
+    _install_dwrite_patch
     install_cjk_font_fix
 fi
 

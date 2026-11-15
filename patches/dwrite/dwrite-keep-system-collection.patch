@@ -1,0 +1,104 @@
+From 73e8f25c251d32ddb1bd366b3e67df4c87769e3f Mon Sep 17 00:00:00 2001
+From: ahzaidi <ahmedzd111@gmail.com>
+Date: Sat, 14 Nov 2026 21:49:52 +0000
+Subject: [PATCH] dwrite: Keep the shared factory's system font collections
+ alive.
+
+The factory only holds a weak pointer to its system collections, so the
+collection is destroyed with the last reference an application drops and
+the next GetSystemFontCollection() call rebuilds it from every installed
+font. Applications that fetch the collection for each lookup, such as
+through IDWriteGdiInterop::CreateFontFromLOGFONT(), then spend tens of
+seconds rebuilding it with a thousand fonts installed.
+
+The shared factory lives until the module is unloaded and its reference
+count is fixed, so it can keep a reference to each collection without a
+reference cycle. Reuse it until the system fonts key changes, which is the
+check the system font set already uses, and then build a new one. Callers
+still holding the old collection keep a valid snapshot.
+---
+ dlls/dwrite/main.c | 54 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 54 insertions(+)
+
+diff --git a/dlls/dwrite/main.c b/dlls/dwrite/main.c
+index b343d65..5a19644 100644
+--- a/dlls/dwrite/main.c
++++ b/dlls/dwrite/main.c
+@@ -599,6 +599,7 @@ struct dwritefactory
+     LONG refcount;
+ 
+     IDWriteFontCollection *system_collections[DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE + 1];
++    FILETIME system_collections_time[DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE + 1];
+     IDWriteFontCollection1 *eudc_collection;
+     IDWriteGdiInterop1 *gdiinterop;
+     IDWriteFontFallback1 *fallback;
+@@ -724,6 +725,56 @@ static struct collectionloader *factory_get_collection_loader(struct dwritefacto
+     return found;
+ }
+ 
++static void get_system_fonts_mtime(FILETIME *mtime);
++
++/* The shared factory lives as long as the module, so it keeps a reference to its system collections instead
++   of dropping them with the last user reference. Applications that fetch the collection for each call would
++   otherwise rebuild it every time. A kept collection is replaced once the system fonts change. */
++static HRESULT factory_get_shared_system_collection(struct dwritefactory *factory,
++        DWRITE_FONT_FAMILY_MODEL family_model, REFIID riid, void **out)
++{
++    IDWriteFontCollection *collection, *stale = NULL;
++    FILETIME timestamp;
++    HRESULT hr;
++
++    get_system_fonts_mtime(&timestamp);
++
++    EnterCriticalSection(&factory->cs);
++    if ((collection = factory->system_collections[family_model])
++            && CompareFileTime(&timestamp, &factory->system_collections_time[family_model]) > 0)
++    {
++        stale = collection;
++        collection = factory->system_collections[family_model] = NULL;
++    }
++    if (collection) hr = IDWriteFontCollection_QueryInterface(collection, riid, out);
++    LeaveCriticalSection(&factory->cs);
++
++    if (stale) IDWriteFontCollection_Release(stale);
++    if (collection) return hr;
++
++    if (FAILED(hr = get_system_fontcollection(&factory->IDWriteFactory7_iface, family_model, &collection)))
++    {
++        WARN("Failed to create system font collection, hr %#lx.\n", hr);
++        return hr;
++    }
++
++    EnterCriticalSection(&factory->cs);
++    if (factory->system_collections[family_model])
++    {
++        IDWriteFontCollection_Release(collection);
++        collection = factory->system_collections[family_model];
++    }
++    else
++    {
++        factory->system_collections[family_model] = collection;
++        factory->system_collections_time[family_model] = timestamp;
++    }
++    hr = IDWriteFontCollection_QueryInterface(collection, riid, out);
++    LeaveCriticalSection(&factory->cs);
++
++    return hr;
++}
++
+ static HRESULT factory_get_system_collection(struct dwritefactory *factory,
+         DWRITE_FONT_FAMILY_MODEL family_model, REFIID riid, void **out)
+ {
+@@ -738,6 +789,9 @@ static HRESULT factory_get_system_collection(struct dwritefactory *factory,
+         return E_INVALIDARG;
+     }
+ 
++    if (&factory->IDWriteFactory7_iface == shared_factory)
++        return factory_get_shared_system_collection(factory, family_model, riid, out);
++
+     if (factory->system_collections[family_model])
+         return IDWriteFontCollection_QueryInterface(factory->system_collections[family_model], riid, out);
+ 
+-- 
+2.56.1
+
