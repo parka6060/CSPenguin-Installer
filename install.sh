@@ -398,6 +398,11 @@ download_progress() {
 }
 
 _detect_pm() {
+    # Fedora Atomic (Bazzite, Silverblue, Kinoite…) — must come BEFORE dnf,
+    # because dnf exists there but refuses to install system packages.
+    if command -v rpm-ostree >/dev/null 2>&1 && [ -f /run/ostree-booted ]; then
+        echo "rpm-ostree"; return
+    fi
     command -v pacman >/dev/null 2>&1 && echo "pacman" && return
     command -v dnf    >/dev/null 2>&1 && echo "dnf"    && return
     command -v apt    >/dev/null 2>&1 && echo "apt"    && return
@@ -407,6 +412,23 @@ _detect_pm() {
 # single install abstraction for the detected package manager
 _pm_install() {
     case "$(_detect_pm)" in
+        rpm-ostree)
+            out=$(sudo rpm-ostree install --idempotent "$@" 2>&1) || {
+                # "already provided" / "already requested" mean the package is
+                # present in the running system — treat as success.
+                if echo "$out" | grep -qiE "already (provided|requested)"; then
+                    return 0
+                fi
+                echo "$out" >&2
+                die "rpm-ostree install failed for: $*"
+            }
+            # "No change" / "already provided" = it's available right now.
+            if echo "$out" | grep -qiE "no change|already provided"; then
+                return 0
+            fi
+            # Otherwise something was actually queued for the next boot.
+            die "package(s) '$*' were staged by rpm-ostree but need a reboot (sudo systemctl reboot); re-run this script afterwards"
+            ;;
         pacman) sudo pacman -S --needed --noconfirm "$@" ;;
         dnf)    sudo dnf install -y "$@" ;;
         apt)    sudo apt install -y "$@" ;;
@@ -415,6 +437,19 @@ _pm_install() {
 }
 
 _gst_ok() { command -v gst-inspect-1.0 >/dev/null 2>&1 && gst-inspect-1.0 h264parse >/dev/null 2>&1; }
+
+_install_deps_rpm_ostree() {
+    local pkgs=()
+    command -v wget    >/dev/null 2>&1 || pkgs+=(wget)
+    command -v curl    >/dev/null 2>&1 || pkgs+=(curl)
+    command -v wmctrl  >/dev/null 2>&1 || pkgs+=(wmctrl)
+    command -v xprop   >/dev/null 2>&1 || pkgs+=(xprop)
+    command -v unzstd  >/dev/null 2>&1 || pkgs+=(zstd)
+    command -v file    >/dev/null 2>&1 || pkgs+=(file)
+    command -v cabextract >/dev/null 2>&1 || pkgs+=(cabextract)
+    _gst_ok          || pkgs+=(gstreamer1-plugins-bad-free gstreamer1-plugins-good)
+    [[ ${#pkgs[@]} -gt 0 ]] && _pm_install "${pkgs[@]}"
+}
 
 _install_deps_pacman() {
     local pkgs=()
@@ -566,14 +601,18 @@ _freetype_dep_pkgs() {
     esac
 }
 
-# unique list of the shared libraries the bundled FreeType cannot resolve
+# unique list of the shared libraries the bundled FreeType cannot resolve.
+# LD_LIBRARY_PATH mirrors what the launcher sets at runtime, so the check
+# agrees with what happens when CSP actually runs.
 _freetype_missing() {
-    ldd "$FREETYPE_DIR/lib64/libfreetype.so.6" "$FREETYPE_DIR/lib32/libfreetype.so.6" 2>/dev/null \
+    LD_LIBRARY_PATH="$FREETYPE_DIR/lib64:$FREETYPE_DIR/lib32${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        ldd "$FREETYPE_DIR/lib64/libfreetype.so.6" "$FREETYPE_DIR/lib32/libfreetype.so.6" 2>/dev/null \
         | grep "not found" \
         | sed 's/^[[:space:]]*\([^ ]*\) => not found.*/\1/' \
         | sort -u \
         || true
 }
+
 
 # copy-pasteable fix command for the given libs
 _freetype_fix_hint() {
@@ -598,18 +637,29 @@ _freetype_fix_hint() {
 
 # some distros ship a library under a different soname than the Arch-built
 # FreeType expects (e.g. Fedora ships libbz2.so.1, FreeType wants libbz2.so.1.0).
-# if the real file exists on disk, link the expected name to it.
+# On immutable systems /usr is read-only, so we cannot add a compat symlink
+# next to the real library. Instead drop it into the bundled FreeType dir,
+# which the launcher already puts on LD_LIBRARY_PATH.
 _freetype_fix_symlink() {
     local lib="$1"
     local base="${lib%.so*}.so"
-    local real target
+    local real dest_dir target
     while IFS= read -r real; do
+        real=$(readlink -f "$real" 2>/dev/null) || continue
         [[ -f "$real" ]] || continue
-        target="${real%/*}/$lib"
+        if file -L "$real" 2>/dev/null | grep -q 'ELF 64-bit'; then
+            dest_dir="$FREETYPE_DIR/lib64"
+        elif file -L "$real" 2>/dev/null | grep -q 'ELF 32-bit'; then
+            dest_dir="$FREETYPE_DIR/lib32"
+        else
+            continue
+        fi
+        [[ -d "$dest_dir" ]] || continue
+        target="$dest_dir/$lib"
         [[ -e "$target" ]] && continue
-        info "linking ${target##*/} -> $(basename "$real")"
-        sudo ln -s "$(basename "$real")" "$target" 2>/dev/null || true
-    done < <(find /usr/lib /usr/lib32 /usr/lib64 /lib /lib32 /lib64 -maxdepth 1 -name "$base.*" -type f 2>/dev/null)
+        info "linking $lib -> $real (bundled FreeType)"
+        ln -s "$real" "$target" 2>/dev/null || true
+    done < <(find /usr/lib /usr/lib32 /usr/lib64 /lib /lib32 /lib64 -maxdepth 1 -name "$base.*" 2>/dev/null)
 }
 
 # ensure the bundled FreeType can resolve its dependencies, installing the
@@ -1182,9 +1232,10 @@ if [[ ${#_missing[@]} -gt 0 ]]; then
             ok "dependencies (dry run)"
         else
             case "$_pm" in
-                pacman) _install_deps_pacman ;;
-                dnf)    _install_deps_dnf ;;
-                apt)    _install_deps_apt ;;
+                rpm-ostree) _install_deps_rpm_ostree ;;
+                pacman)     _install_deps_pacman ;;
+                dnf)        _install_deps_dnf ;;
+                apt)        _install_deps_apt ;;
             esac
         fi
     else
